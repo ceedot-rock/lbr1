@@ -1,0 +1,15 @@
+[package]
+name = "lbr1_price"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "lbr1_price"
+path = "src/lib.rs"
+
+[profile.release]
+lto = false
+opt-level = 3
+codegen-units = 16
+panic = "abort"

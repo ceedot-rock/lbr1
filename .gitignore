@@ -1,0 +1,8 @@
+target/
+**/*.rlib
+**/*.rmeta
+leftbrain/lb
+lbr1_price/target/
+*.lbr
+/tmp/
+speed-cmp/corpora/
