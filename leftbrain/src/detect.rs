@@ -1,23 +1,40 @@
-//! Route before the brain.
+//! Route before the brain. Step 2.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Class { Fill, Sparse, Text, Binary }
+pub enum Class {
+    Fill,
+    Sparse,
+    Text,
+    Binary,
+}
 
 pub fn printable_ratio(data: &[u8]) -> f64 {
-    if data.is_empty() { return 0.0; }
+    if data.is_empty() {
+        return 0.0;
+    }
     let n = data.len().min(64 * 1024);
     let mut p = 0usize;
     for &b in &data[..n] {
-        if (32..127).contains(&b) || b == 9 || b == 10 || b == 13 { p += 1; }
+        if (32..127).contains(&b) || b == 9 || b == 10 || b == 13 {
+            p += 1;
+        }
     }
     p as f64 / n as f64
 }
 
 pub fn classify(data: &[u8]) -> Class {
-    if data.is_empty() { return Class::Fill; }
-    if crate::frame::solid_run(data).is_some() { return Class::Fill; }
-    if crate::frame::sparse_mode(data).is_some() { return Class::Sparse; }
-    if printable_ratio(data) >= 0.85 { return Class::Text; }
+    if data.is_empty() {
+        return Class::Fill;
+    }
+    if crate::frame::solid_run(data).is_some() {
+        return Class::Fill;
+    }
+    if crate::frame::sparse_mode(data).is_some() {
+        return Class::Sparse;
+    }
+    if printable_ratio(data) >= 0.85 {
+        return Class::Text;
+    }
     Class::Binary
 }
 
@@ -30,7 +47,9 @@ pub fn window_for(data: &[u8], asked: u32) -> usize {
     }
 }
 
-pub fn scouts_wanted(data: &[u8]) -> bool { matches!(classify(data), Class::Binary) }
+pub fn scouts_wanted(data: &[u8]) -> bool {
+    matches!(classify(data), Class::Binary)
+}
 
 pub fn scout_stride(data: &[u8]) -> usize {
     match classify(data) {

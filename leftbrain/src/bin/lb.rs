@@ -1,82 +1,94 @@
-//! lb — SPLv1 house CLI. `best` is a pulsar picker until the Drive LBR1 coder is imported.
-
+use leftbrain::{decode, encode_best, encode_window, set_fast, VERSION};
 use std::env;
 use std::fs;
-use std::time::Instant;
+use std::process;
 
 fn usage() -> ! {
-    eprintln!("usage: lb <stat|best|encode|decode> IN [-o OUT]");
-    std::process::exit(2);
+    eprintln!("lb {VERSION}");
+    eprintln!("  lb encode [-w WINDOW] IN OUT");
+    eprintln!("  lb decode IN OUT");
+    eprintln!("  lb stat  [-w WINDOW] FILE   # fast LBR1");
+    eprintln!("  lb fast  FILE               # beam-1 chain-64");
+    eprintln!("  lb champ FILE               # beam-4 cap128 SPLv1 quality");
+    eprintln!("  lb best  FILE               # min(LBR1, BW22) house");
+    eprintln!("  lb aware FILE               # same house; never xz");
+    process::exit(2);
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    if args.is_empty() {
         usage();
     }
-    let cmd = args[1].as_str();
-    let path = &args[2];
-    let mut out: Option<&str> = None;
-    let mut i = 3;
-    while i + 1 < args.len() {
-        if args[i] == "-o" {
-            out = Some(&args[i + 1]);
-            i += 2;
+    let cmd = args.remove(0);
+    let mut window: u32 = leftbrain::parse::DEFAULT_WINDOW as u32;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-w" && i + 1 < args.len() {
+            window = args[i + 1].parse().unwrap_or(window);
+            args.remove(i);
+            args.remove(i);
         } else {
-            usage();
+            i += 1;
         }
     }
-    match cmd {
-        "stat" => stat(path),
-        "best" | "encode" => {
-            let data = fs::read(path).expect("read");
-            let t = Instant::now();
-            let (blob, kind) = leftbrain::encode_best(&data).expect("encode");
-            let back = leftbrain::decode(&blob).expect("decode");
-            assert_eq!(back, data, "DECODE_OK failed");
-            eprintln!(
-                "{path} {} -> {} ({kind}) {:.3}s DECODE_OK",
-                data.len(),
-                blob.len(),
-                t.elapsed().as_secs_f64()
-            );
-            if let Some(p) = out {
-                fs::write(p, blob).expect("write");
+    match cmd.as_str() {
+        "encode" if args.len() == 2 => {
+            let raw = fs::read(&args[0]).expect("read");
+            match encode_window(&raw, window) {
+                Some(b) => {
+                    fs::write(&args[1], &b).expect("write");
+                    eprintln!("{} -> {}  ({:.4})", raw.len(), b.len(), b.len() as f64 / raw.len() as f64);
+                }
+                None => {
+                    eprintln!("expand-or-fail; not writing");
+                    process::exit(1);
+                }
             }
         }
-        "decode" => {
-            let blob = fs::read(path).expect("read");
-            let data = leftbrain::decode(&blob).expect("decode");
-            if let Some(p) = out {
-                fs::write(p, data).expect("write");
+        "decode" if args.len() == 2 => {
+            let blob = fs::read(&args[0]).expect("read");
+            let back = decode(&blob).expect("decode");
+            fs::write(&args[1], &back).expect("write");
+            eprintln!("decoded {}", back.len());
+        }
+        "stat" | "fast" | "champ" | "best" | "aware" if args.len() == 1 => {
+            let raw = fs::read(&args[0]).expect("read");
+            let house = cmd == "best" || cmd == "aware";
+            set_fast(cmd == "fast");
+            if cmd == "aware" {
+                eprintln!("AWARE own-path (XZ1 retired: mozilla samba sao ooffice)");
+            }
+            let t0 = std::time::Instant::now();
+            let got = if house {
+                encode_best(&raw)
             } else {
-                eprintln!("decoded {} bytes", data.len());
+                encode_window(&raw, window).map(|b| (b, "lbr1"))
+            };
+            match got {
+                Some((b, kind)) => {
+                    let enc = t0.elapsed();
+                    let t1 = std::time::Instant::now();
+                    let back = decode(&b).expect("decode");
+                    let dec = t1.elapsed();
+                    assert_eq!(back, raw, "DECODE_OK failed");
+                    println!(
+                        "{}\traw={}\tcoded={}\tratio={:.4}\tkind={}\tenc_ms={}\tdec_ms={}\tDECODE_OK",
+                        args[0],
+                        raw.len(),
+                        b.len(),
+                        b.len() as f64 / raw.len() as f64,
+                        kind,
+                        enc.as_millis(),
+                        dec.as_millis()
+                    );
+                }
+                None => {
+                    println!("{}\traw={}\tcoded=EXPAND", args[0], raw.len());
+                    process::exit(1);
+                }
             }
         }
         _ => usage(),
-    }
-}
-
-fn stat(path: &str) {
-    let data = fs::read(path).expect("read");
-    let class = leftbrain::detect::classify(&data);
-    eprintln!("file {path} {} class={class:?}", data.len());
-    let t = Instant::now();
-    let matches = leftbrain::parse::matches_for(&data);
-    let picks: usize = matches.iter().filter(|v| !v.is_empty()).count();
-    let max_len = matches
-        .iter()
-        .flatten()
-        .map(|m| m.len)
-        .max()
-        .unwrap_or(0);
-    eprintln!(
-        "finder picks_at {picks} max_len {max_len} {:.3}s",
-        t.elapsed().as_secs_f64()
-    );
-    if let Some((blob, kind)) = leftbrain::encode_best(&data) {
-        let back = leftbrain::decode(&blob).expect("decode");
-        assert_eq!(back, data);
-        eprintln!("pulsar-picker {kind} {} DECODE_OK", blob.len());
     }
 }
