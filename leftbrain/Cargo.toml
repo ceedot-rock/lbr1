@@ -1,0 +1,28 @@
+[package]
+name = "leftbrain"
+version = "0.1.0"
+edition = "2021"
+description = "Left brain: own LZ match parser + rANS for binaries. Pair with BWT right brain."
+license = "UNLICENSED"
+publish = false
+
+[lib]
+name = "leftbrain"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lb"
+path = "src/bin/lb.rs"
+
+[profile.release]
+lto = false
+codegen-units = 1
+opt-level = 3
+
+[dependencies]
+lbr1_price = { path = "../lbr1_price" }
+# pulsar = { path = "../speed-cmp/pulsar-best" }  # optional house picker
+
+[[bin]]
+name = "train"
+path = "src/bin/train.rs"
