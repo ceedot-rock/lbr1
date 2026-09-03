@@ -1,0 +1,3 @@
+[submodule "speed-cmp/pulsar-best"]
+	path = speed-cmp/pulsar-best
+	url = git@github.com:ceedot-rock/pulsar-best.git
