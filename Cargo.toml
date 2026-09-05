@@ -1,5 +1,5 @@
 [workspace]
-members = ["leftbrain", "lbr1_price"]
+members = ["splb", "lbr1_price"]
 resolver = "2"
 
 [profile.release]

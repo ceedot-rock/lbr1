@@ -1,6 +1,7 @@
 target/
 **/*.rlib
 **/*.rmeta
+splb/lb
 leftbrain/lb
 lbr1_price/target/
 *.lbr

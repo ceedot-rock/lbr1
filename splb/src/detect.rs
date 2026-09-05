@@ -22,6 +22,20 @@ pub fn printable_ratio(data: &[u8]) -> f64 {
     p as f64 / n as f64
 }
 
+/// OmniWave seat names = mixture-of-experts routing, occupied by our engines.
+/// Never gzip/brotli/xz. Never Distill NCA. Never a swarm in the inner loop.
+pub fn omni_seat(kind: &str) -> &'static str {
+    match kind {
+        "tru8" | "tr8x" => "ZRW_delegate",
+        "bw22" => "struct_text",
+        "lbr1" => "general",
+        "lbhm" => "mixed",
+        "elide" | "arth" => "CDDG",
+        "gc" | "aware" | "gcr1" => "AWARE",
+        _ => "general",
+    }
+}
+
 pub fn classify(data: &[u8]) -> Class {
     if data.is_empty() {
         return Class::Fill;
@@ -49,6 +63,19 @@ pub fn window_for(data: &[u8], asked: u32) -> usize {
 
 pub fn scouts_wanted(data: &[u8]) -> bool {
     matches!(classify(data), Class::Binary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omni_seats_are_ours() {
+        assert_eq!(omni_seat("tru8"), "ZRW_delegate");
+        assert_eq!(omni_seat("tr8x"), "ZRW_delegate");
+        assert_eq!(omni_seat("bw22"), "struct_text");
+        assert_eq!(omni_seat("lbr1"), "general");
+    }
 }
 
 pub fn scout_stride(data: &[u8]) -> usize {

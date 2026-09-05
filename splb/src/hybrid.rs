@@ -1,12 +1,13 @@
-//! One container, four modes. LBR1 is the spine.
+//! LBHM mixed-file packer. One gene per segment. Not Combined GC.
 //!
 //! Split only when the file is actually mixed. Uniform binaries
 //! (mozilla, ooffice) stay one LBR1 window so far copies survive.
+//! Coalesce same-class runs. Keep only if crate::decode roundtrips.
 
 use crate::detect::{self, Class};
 use crate::frame;
 
-pub const MAGIC: &[u8; 4] = b"LBHX";
+pub const MAGIC: &[u8; 4] = b"LBHM";
 pub const KIND_TRU8: u8 = 1;
 pub const KIND_TR8X: u8 = 2;
 pub const KIND_LBR1: u8 = 3;
@@ -40,34 +41,35 @@ fn window_class(data: &[u8], start: usize, end: usize) -> Class {
 }
 
 pub fn is_mixed(data: &[u8]) -> bool {
-    if data.len() < WIN * 2 {
-        return detect::classify(data) != Class::Binary
-            && data.len() >= MIN_FILL
-            && frame::solid_run(data).is_none();
+    if data.len() < MIN_FILL {
+        return false;
     }
-    let mut n_fill = 0usize;
-    let mut n_sparse = 0usize;
-    let mut n_text = 0usize;
-    let mut n_bin = 0usize;
-    let mut i = 0usize;
-    while i < data.len() {
-        let e = (i + WIN).min(data.len());
-        match window_class(data, i, e) {
-            Class::Fill => n_fill += e - i,
-            Class::Sparse => n_sparse += e - i,
-            Class::Text => n_text += e - i,
-            Class::Binary => n_bin += e - i,
-        }
-        i = e;
+    let segs = segments(data);
+    if segs.len() < 2 {
+        return false;
     }
     let n = data.len() as f64;
-    let parts = [
-        n_fill as f64 / n,
-        n_sparse as f64 / n,
-        n_text as f64 / n,
-        n_bin as f64 / n,
-    ];
-    let present = parts.iter().filter(|&&p| p >= MIN_MINOR).count();
+    let mut bytes = [0usize; 4];
+    for s in &segs {
+        let k = match s.class {
+            Class::Fill => 0,
+            Class::Sparse => 1,
+            Class::Text => 2,
+            Class::Binary => 3,
+        };
+        bytes[k] += s.end - s.start;
+    }
+    let present = bytes
+        .iter()
+        .enumerate()
+        .filter(|&(i, &b)| {
+            if i == 0 {
+                b >= MIN_FILL
+            } else {
+                b as f64 / n >= MIN_MINOR
+            }
+        })
+        .count();
     present >= 2
 }
 
@@ -180,14 +182,14 @@ pub fn pack(data: &[u8], allow_bw: bool) -> Option<Vec<u8>> {
 
 pub fn unpack(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
     if buf.len() < 6 || &buf[..4] != MAGIC {
-        return Err("lbhx");
+        return Err("lbhm");
     }
     let n = u16::from_le_bytes(buf[4..6].try_into().unwrap()) as usize;
     let mut i = 6usize;
     let mut out = Vec::new();
     for _ in 0..n {
         if i + 9 > buf.len() {
-            return Err("lbhx hdr");
+            return Err("lbhm hdr");
         }
         let kind = buf[i];
         i += 1;
@@ -196,7 +198,7 @@ pub fn unpack(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
         let blob_len = u32::from_le_bytes(buf[i..i + 4].try_into().unwrap()) as usize;
         i += 4;
         if i + blob_len > buf.len() {
-            return Err("lbhx body");
+            return Err("lbhm body");
         }
         let blob = &buf[i..i + blob_len];
         i += blob_len;
@@ -205,15 +207,15 @@ pub fn unpack(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
             KIND_TR8X => frame::unpack_tr8x(blob)?,
             KIND_LBR1 => crate::decode_lbr1(blob)?,
             KIND_BW22 => pulsar::pulsar_decode(blob)?,
-            _ => return Err("lbhx kind"),
+            _ => return Err("lbhm kind"),
         };
         if part.len() != raw_len {
-            return Err("lbhx len");
+            return Err("lbhm len");
         }
         out.extend_from_slice(&part);
     }
     if i != buf.len() {
-        return Err("lbhx tail");
+        return Err("lbhm tail");
     }
     Ok(out)
 }

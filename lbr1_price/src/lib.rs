@@ -1,227 +1,264 @@
-//! Scalar beam-4 DP. Cheap lit/rep/far costs. C ABI names kept.
+//! C ABI price DP. No finder. No Vec<Vec<Match>>.
 
-#[derive(Clone, Copy, Debug)]
-pub struct Match {
-    pub dist: u32,
-    pub len: u32,
-    pub is_comp: bool,
-}
+pub const MIN_MATCH: u32 = 4;
+const PINIT: u16 = 1024;
+const INF: u32 = u32::MAX / 4;
+const MAXL: usize = 274;
 
-#[derive(Clone, Copy, Debug)]
-pub struct RepState(pub [u32; 4]);
-
-#[derive(Clone, Copy, Debug)]
-pub struct SmallCostsC {
-    pub lit_cost: u32,
-    pub rep_cost: u32,
-    pub rep_len_mult: f32,
-}
-
-impl Default for SmallCostsC {
-    fn default() -> Self {
-        Self {
-            lit_cost: 5,
-            rep_cost: 3,
-            rep_len_mult: 1.0,
-        }
-    }
-}
-
-impl SmallCostsC {
-    pub fn price_lit(&self, _phi: u32, _prev: u8, _pos: u32) -> u32 {
-        self.lit_cost
-    }
-
-    pub fn price_rep(&self, len: u32) -> u32 {
-        let base = match len {
-            3..=10 => 4,
-            11..=18 => 6,
-            19..=36 => 10,
-            _ => 12,
-        };
-        (base as f32 * self.rep_len_mult) as u32 + self.rep_cost
-    }
-
-    pub fn price_far(&self, len: u32, dist: u32) -> u32 {
-        let slot = match dist {
-            0..=7 => 3,
-            8..=63 => 5,
-            64..=511 => 7,
-            _ => 9,
-        };
-        let len_c = match len {
-            3..=10 => 4,
-            11..=18 => 6,
-            19..=36 => 10,
-            _ => 12,
-        };
-        slot + len_c + (dist as f32).log2() as u32 / 2
-    }
-}
-
+#[repr(C)]
 #[derive(Clone, Copy)]
-struct BeamState {
-    cost: u64,
-    rep: RepState,
-    via_d: u32,
-    via_l: u32,
-    prev: i32,
+pub struct TinyBookC {
+    pub match_ctx: [u16; 64],
+    pub p_rep: [u16; 8],
+    pub p_len0: [u16; 32],
+    pub dist_slot: [u16; 64],
+    pub lit_avg: [u16; 2],
 }
 
-fn is_rep(rep: &RepState, dist: u32) -> bool {
-    dist > 0 && dist < 8 && rep.0.iter().any(|&r| r == dist)
-}
-
-fn push_rep(rep: RepState, dist: u32) -> RepState {
-    let mut r = [dist, 0, 0, 0];
-    let mut i = 1usize;
-    for old in rep.0 {
-        if old != dist && i < 4 {
-            r[i] = old;
-            i += 1;
+impl TinyBookC {
+    pub fn new() -> Self {
+        Self {
+            match_ctx: [PINIT; 64],
+            p_rep: [PINIT; 8],
+            p_len0: [PINIT; 32],
+            dist_slot: [PINIT; 64],
+            lit_avg: [PINIT, PINIT],
         }
     }
-    RepState(r)
 }
 
-/// Scalar DP, beam-4 full-tuple rep[4]. Returns (best_d, best_l, rep_at).
-pub fn price_block_c(
-    data: &[u8],
-    matches: &[Vec<Match>],
-    beam: usize,
-) -> (Vec<u32>, Vec<u32>, Vec<RepState>) {
-    let n = data.len();
-    let beam = beam.max(1).min(8);
-    let costs = SmallCostsC::default();
-    let inf = u64::MAX / 4;
-    let mut beams: Vec<Vec<BeamState>> = vec![Vec::new(); n + 1];
-    beams[0].push(BeamState {
-        cost: 0,
-        rep: RepState([0, 0, 0, 0]),
-        via_d: 0,
-        via_l: 0,
-        prev: -1,
-    });
-
-    for pos in 0..n {
-        let slot = std::mem::take(&mut beams[pos]);
-        if slot.is_empty() {
-            continue;
-        }
-        for st in slot {
-            let lit = st.cost + costs.price_lit(0, data[pos], pos as u32) as u64;
-            consider(&mut beams[pos + 1], beam, BeamState {
-                cost: lit,
-                rep: st.rep,
-                via_d: 0,
-                via_l: 1,
-                prev: pos as i32,
-            });
-            if pos < matches.len() {
-                for m in &matches[pos] {
-                    let len = m.len as usize;
-                    if len < 3 || pos + len > n {
-                        continue;
-                    }
-                    let p = if m.is_comp || is_rep(&st.rep, m.dist) {
-                        costs.price_rep(m.len)
-                    } else {
-                        costs.price_far(m.len, m.dist)
-                    };
-                    consider(&mut beams[pos + len], beam, BeamState {
-                        cost: st.cost + p as u64,
-                        rep: push_rep(st.rep, m.dist),
-                        via_d: m.dist,
-                        via_l: m.len,
-                        prev: pos as i32,
-                    });
-                }
-            }
-        }
-        let _ = inf;
-    }
-
-    let mut best_d = vec![0u32; n + 1];
-    let mut best_l = vec![0u32; n + 1];
-    let mut reps = vec![RepState([0, 0, 0, 0]); n + 1];
-    let mut cur = n;
-    if let Some(win) = beams[n].iter().min_by_key(|s| s.cost).cloned() {
-        let mut st = win;
-        loop {
-            best_d[cur] = st.via_d;
-            best_l[cur] = st.via_l;
-            reps[cur] = st.rep;
-            if st.prev < 0 {
-                break;
-            }
-            let p = st.prev as usize;
-            let want_d = st.via_d;
-            let want_l = st.via_l;
-            let pred = beams[p]
-                .iter()
-                .find(|s| {
-                    let nxt = if want_l <= 1 { p + 1 } else { p + want_l as usize };
-                    nxt == cur && s.cost <= st.cost
-                })
-                .cloned();
-            if let Some(prev_st) = pred {
-                let _ = (want_d, want_l);
-                st = prev_st;
-                cur = p;
-            } else if st.prev >= 0 {
-                cur = st.prev as usize;
-                if beams[cur].is_empty() {
-                    break;
-                }
-                st = beams[cur][0];
-            } else {
-                break;
-            }
-        }
-    }
-    (best_d, best_l, reps)
+fn bit_price(p: u16, bit: u32) -> u32 {
+    let c = if bit == 0 { 2048 - p as u32 } else { p as u32 };
+    c * 32
 }
 
-fn consider(slot: &mut Vec<BeamState>, beam: usize, st: BeamState) {
-    if let Some(ex) = slot.iter_mut().find(|s| s.rep.0 == st.rep.0) {
-        if st.cost < ex.cost {
-            *ex = st;
+fn p_update(p: &mut u16, bit: u32) {
+    if bit == 0 {
+        *p = (*p).saturating_add((2048 - *p) >> 5).min(2047);
+    } else {
+        *p = (*p - (*p >> 5)).max(1);
+    }
+}
+
+struct Costs {
+    match0: [u32; 64],
+    match1: [u32; 64],
+    rep: u32,
+    new_dist: u32,
+    len: [u32; MAXL],
+    slot: [u32; 64],
+    lit: u32,
+}
+
+fn bias(p: u16, bit: u32) -> u32 {
+    let pr = p as u32;
+    if bit == 0 { (2048 - pr) >> 8 } else { pr >> 8 }
+}
+
+fn costs_from(t: &TinyBookC) -> Costs {
+    let mut c = Costs {
+        match0: [0; 64],
+        match1: [0; 64],
+        rep: 0,
+        new_dist: 0,
+        len: [0; MAXL],
+        slot: [0; 64],
+        lit: 0,
+    };
+    for i in 0..64 {
+        c.match0[i] = 1 + bias(t.match_ctx[i], 0);
+        c.match1[i] = 1 + bias(t.match_ctx[i], 1);
+        c.slot[i] = 5 + (i as u32).saturating_sub(1);
+    }
+    c.rep = 4 + bias(t.p_rep[0], 1);
+    c.new_dist = 2 + bias(t.p_rep[0], 0);
+    for len in 0..MAXL {
+        let extra = (len as u32).saturating_sub(MIN_MATCH);
+        c.len[len] = if extra < 8 {
+            4
+        } else if extra < 16 {
+            6
+        } else if extra < 31 {
+            10
+        } else {
+            26
+        };
+    }
+    c.lit = 10 + bias(t.lit_avg[0], 0);
+    c
+}
+
+fn match_len(buf: &[u8], i: usize, j: usize, cap: usize) -> usize {
+    let n = buf.len();
+    let mut l = 0;
+    while i + l < n && j + l < n && l < cap && buf[i + l] == buf[j + l] {
+        l += 1;
+    }
+    l
+}
+
+fn lens_push(out: &mut [u32; 16], best: u32) -> usize {
+    let best = best.min((MAXL - 1) as u32);
+    if best < MIN_MATCH {
+        return 0;
+    }
+    let mut n = 0usize;
+    let mut l = MIN_MATCH;
+    while l <= best.min(8) && n < 15 {
+        out[n] = l;
+        n += 1;
+        l += 1;
+    }
+    for k in [12u32, 16, 24, 32, 48, 64, 128, 256] {
+        if k < best && k >= MIN_MATCH && n < 15 {
+            out[n] = k;
+            n += 1;
         }
+    }
+    if n < 16 {
+        out[n] = best;
+        n += 1;
+    }
+    n
+}
+
+use std::cell::RefCell;
+thread_local! {
+    static TINY: RefCell<TinyBookC> = RefCell::new(TinyBookC::new());
+}
+
+/// DP only. `come` must be prefilled with -1. Never writes come_len == 0.
+#[no_mangle]
+pub extern "C" fn price_block_c(
+    price: *mut u32,
+    come: *mut i32,
+    come_d: *mut u32,
+    last_at: *mut u32,
+    buf: *const u8,
+    buf_len: usize,
+    pos: usize,
+    block_len: usize,
+    best_d: *const u32,
+    best_l: *const u32,
+    file_last: u32,
+) {
+    if price.is_null() || come.is_null() || block_len == 0 {
         return;
     }
-    slot.push(st);
-    if slot.len() > beam {
-        slot.sort_by_key(|s| s.cost);
-        slot.truncate(beam);
+    let m = block_len;
+    let price = unsafe { std::slice::from_raw_parts_mut(price, m + 1) };
+    let come = unsafe { std::slice::from_raw_parts_mut(come, m + 1) };
+    let come_d = unsafe { std::slice::from_raw_parts_mut(come_d, m + 1) };
+    let last_at = unsafe { std::slice::from_raw_parts_mut(last_at, m + 1) };
+    let buf = unsafe { std::slice::from_raw_parts(buf, buf_len) };
+    let best_d = unsafe { std::slice::from_raw_parts(best_d, m) };
+    let best_l = unsafe { std::slice::from_raw_parts(best_l, m) };
+
+    let tiny = TINY.with(|t| *t.borrow());
+    let sc = costs_from(&tiny);
+
+    for i in 0..=m {
+        price[i] = INF;
+        come[i] = -1;
+        come_d[i] = 0;
+        last_at[i] = 0;
     }
+    price[0] = 0;
+    last_at[0] = file_last;
+
+    let mut cand = [0u32; 16];
+    for k in 0..m {
+        if price[k] == INF {
+            continue;
+        }
+        let ctx = k & 63;
+        let pl = price[k].saturating_add(sc.match0[ctx] + sc.lit);
+        if pl < price[k + 1] {
+            price[k + 1] = pl;
+            come[k + 1] = -1;
+            last_at[k + 1] = last_at[k];
+        }
+        let i0 = pos + k;
+        let ld = last_at[k];
+        if ld > 0 && (ld as usize) <= i0 && i0 < buf_len {
+            let cap = (m - k).min(MAXL - 1);
+            let lr = match_len(buf, i0, i0 - ld as usize, cap) as u32;
+            let n = lens_push(&mut cand, lr);
+            for t in 0..n {
+                let len = cand[t];
+                if len < MIN_MATCH {
+                    continue;
+                }
+                let j = k + len as usize;
+                if j > m {
+                    continue;
+                }
+                let li = len.min((MAXL - 1) as u32) as usize;
+                let pm = price[k].saturating_add(sc.match1[ctx] + sc.len[li] + sc.rep);
+                if pm < price[j] {
+                    price[j] = pm;
+                    come[j] = len as i32;
+                    come_d[j] = 0;
+                    last_at[j] = ld;
+                }
+            }
+        }
+        if best_l[k] >= MIN_MATCH {
+            let n = lens_push(&mut cand, best_l[k]);
+            for t in 0..n {
+                let len = cand[t];
+                if len < MIN_MATCH {
+                    continue;
+                }
+                let j = k + len as usize;
+                if j > m {
+                    continue;
+                }
+                let is_rep = best_d[k] == last_at[k] && last_at[k] != 0;
+                let li = len.min((MAXL - 1) as u32) as usize;
+                let add = if is_rep {
+                    sc.match1[ctx] + sc.len[li] + sc.rep
+                } else {
+                    let slot = (32 - best_d[k].max(1).leading_zeros()).min(63) as usize;
+                    sc.match1[ctx] + sc.len[li] + sc.new_dist + sc.slot[slot]
+                };
+                let pm = price[k].saturating_add(add);
+                if pm < price[j] {
+                    price[j] = pm;
+                    come[j] = len as i32;
+                    come_d[j] = if is_rep { 0 } else { best_d[k] };
+                    last_at[j] = if is_rep { last_at[k] } else { best_d[k] };
+                }
+            }
+        }
+    }
+
+    // adapt TinyBook from this block's chosen path
+    TINY.with(|cell| {
+        let mut t = cell.borrow_mut();
+        let mut k = m;
+        let mut guard = 0usize;
+        while k > 0 && guard < m + 2 {
+            guard += 1;
+            if come[k] < 0 {
+                p_update(&mut t.match_ctx[0], 0);
+                k -= 1;
+            } else {
+                let len = come[k] as usize;
+                if len == 0 || len > k {
+                    p_update(&mut t.match_ctx[0], 0);
+                    k -= 1;
+                    continue;
+                }
+                p_update(&mut t.match_ctx[0], 1);
+                p_update(&mut t.p_rep[0], if come_d[k] == 0 { 1 } else { 0 });
+                k -= len;
+            }
+        }
+    });
 }
 
 #[no_mangle]
-pub extern "C" fn price_reset_c() {}
-
-#[no_mangle]
-pub extern "C" fn price_block_c_abi(
-    _n: u32,
-    _beam: u32,
-    _out_cost: *mut u64,
-) -> i32 {
-    0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn prefers_match() {
-        let data = b"abcabcabc";
-        let mut matches = vec![Vec::new(); data.len()];
-        matches[3].push(Match {
-            dist: 3,
-            len: 6,
-            is_comp: false,
-        });
-        let (d, l, _) = price_block_c(data, &matches, 4);
-        assert!(l.iter().any(|&x| x >= 3) || d.iter().any(|&x| x == 3));
-    }
+pub extern "C" fn price_reset_c() {
+    TINY.with(|t| *t.borrow_mut() = TinyBookC::new());
 }

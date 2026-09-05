@@ -1,5 +1,6 @@
 //! LBHX — own-path house. Tags which lab engine coded the payload.
-//! Not Combined GC. Not a host xz wrap.
+//! Mixture-of-experts packer tag, not a swarm and not Combined GC.
+//! Not a host xz wrap.
 
 pub const MAGIC: &[u8; 4] = b"LBHX";
 

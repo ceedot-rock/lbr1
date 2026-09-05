@@ -1,14 +1,24 @@
-# SPLv1 vs pulsar — private note 2026-09-03
+# PCC vs pulsar — private note 2026-09-03
 
 Not public. Not Combined GC. Not a rank claim vs paq8px / cmix / zpaq.
 
 ## Wrap our own methods (the DNA question)
 
-Yes — if every payload is a lab engine, wrap them in one house. That is **LBHX**.
+Yes — if every payload is a lab engine, wrap them in one house. That is **LBHM**.
 
 DNA is not a second compressor and not a Combined GC dump. It is a **match class inside LBR1**: `data[a+k] == !data[b+k]` priced as a cheap rep (3 bits), same as a recent distance. Complement of 0x00 is 0xFF; that is the binary analogue of A↔T / C↔G.
 
-House tags (one blob, decoder reads the tag):
+House tags (one blob, decoder reads the tag). OmniWave seats keep their names; occupants are ours:
+
+| OmniWave seat | was (not ours) | now |
+|---|---|---|
+| ZRW_delegate | ZRW stub / zlib | TRU8 / TR8X |
+| struct_text | brotli-11 skin | pulsar BW22 |
+| general | gzip-9 skin | LBR1 |
+| mixed | — | LBHM (`hybrid.rs`; LBHX name retired) |
+| CDDG | named only | ExCalibur ELID, MIN_RUN=1024 |
+| float_xor | lossy quantize | vacant |
+| AWARE | — | Combined GC, private house, min() vs pulsar/LBR1 |
 
 | tag | engine | when |
 |---|---|---|
@@ -16,11 +26,11 @@ House tags (one blob, decoder reads the tag):
 | TR8X | sparse tile | mostly zeros |
 | BW22 | pulsar 2.5.0 | text / BWT-friendly |
 | LBR1 | hash-chain + beam-4 + Phi, DNA comps on | binaries |
-| LBHX | this wrapper | mixed file, split only if mixed ≥8% |
+| LBHM | this wrapper | mixed file, split only if mixed ≥8% |
 
 Combined GC stays a **private product**, not a tag in this git tree. Its own-path pieces (ZRW / Gate / Mix) can feed AWARE later. Host xz wrap (XZ1) stays retired — OSCB will not count a gzip/xz skin as ours.
 
-Wrapping everything “like DNA” means: one genome (LBHX), many genes (own engines), complement matches as a cheap mutation class. It does **not** mean paste Combined GC source into pulsar.
+Wrapping everything “like DNA” means: one genome (LBHM), many genes (own engines), complement matches as a cheap mutation class. It does **not** mean paste Combined GC source into pulsar.
 
 ## Pathway (honest)
 
@@ -43,6 +53,6 @@ To actually lead an official table we need LBR1+DNA+coder to close that mozilla 
 
 ## This git tree
 
-Finder + DNA complement class + beam-4 price + LBHX house + pulsar-backed `lb best`.
+Finder + DNA complement class + beam-4 price + LBHM house + pulsar-backed `lb best`.
 Measured LBR1 range coder is still Drive zip `lbr1-private-snapshot-2026-09-03.zip`.
 `lb fast` beam-1 is not a product path.

@@ -1,8 +1,8 @@
-# SPLv1 — Slid Phi Labs (PRIVATE)
+# PCC — Slid Phi Labs (PRIVATE)
 
-**SPLv1** is the product name.
-Engines: LBR1 / LBHX / TRU8 / TR8X / BW22.
-All rights reserved. Not public. Not a wrap.
+**PCC** — Ptaszenski Computational Codec.
+Engines: LBR1 / LBHM / TRU8 / TR8X / BW22.
+All rights reserved. Not public. Not a wrap. Combined GC is not in this tree.
 
 ## Champ (DECODE_OK)
 
@@ -15,5 +15,5 @@ cap128 beam-4 scalar DP. Enc mozilla 182s / 831MB.
 
 ## Product
 
-`lb best` = min(TRU8, TR8X, LBR1, BW22, LBHX).
-Uniform binaries stay whole-file LBR1.
+`lb best` = min(TRU8, TR8X, LBR1, BW22, LBHM). Public seats only.
+House adds AWARE + CDDG privately. Uniform binaries stay whole-file LBR1.

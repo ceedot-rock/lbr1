@@ -1,13 +1,13 @@
 [package]
-name = "leftbrain"
+name = "splb"
 version = "0.1.0"
 edition = "2021"
-description = "Left brain: own LZ match parser + rANS for binaries. Pair with BWT right brain."
-license = "MIT"
+description = "PCC crate (splb) — TRU8/TR8X/LBR1 house, pulsar BW22 for text. Not Combined GC."
+license = "UNLICENSED"
 publish = false
 
 [lib]
-name = "leftbrain"
+name = "splb"
 path = "src/lib.rs"
 
 [[bin]]

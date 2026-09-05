@@ -1,16 +1,15 @@
-use leftbrain::{decode, encode_best, encode_window, set_fast, VERSION};
+use splb::{decode, encode_best, encode_window, VERSION};
 use std::env;
 use std::fs;
 use std::process;
 
 fn usage() -> ! {
-    eprintln!("lb {VERSION}");
+    eprintln!("PCC {VERSION}");
     eprintln!("  lb encode [-w WINDOW] IN OUT");
     eprintln!("  lb decode IN OUT");
-    eprintln!("  lb stat  [-w WINDOW] FILE   # fast LBR1");
-    eprintln!("  lb fast  FILE               # beam-1 chain-64");
-    eprintln!("  lb champ FILE               # beam-4 cap128 SPLv1 quality");
-    eprintln!("  lb best  FILE               # min(LBR1, BW22) house");
+    eprintln!("  lb stat  [-w WINDOW] FILE");
+    eprintln!("  lb champ FILE               # LBR1 quality path");
+    eprintln!("  lb best  FILE               # PCC house: min(TRU8, TR8X, LBR1, BW22)");
     eprintln!("  lb aware FILE               # same house; never xz");
     process::exit(2);
 }
@@ -21,7 +20,7 @@ fn main() {
         usage();
     }
     let cmd = args.remove(0);
-    let mut window: u32 = leftbrain::parse::DEFAULT_WINDOW as u32;
+    let mut window: u32 = splb::parse::DEFAULT_WINDOW as u32;
     let mut i = 0;
     while i < args.len() {
         if args[i] == "-w" && i + 1 < args.len() {
@@ -38,7 +37,7 @@ fn main() {
             match encode_window(&raw, window) {
                 Some(b) => {
                     fs::write(&args[1], &b).expect("write");
-                    eprintln!("{} -> {}  ({:.4})", raw.len(), b.len(), b.len() as f64 / raw.len() as f64);
+                    eprintln!("{} -> {} ({:.4})", raw.len(), b.len(), b.len() as f64 / raw.len() as f64);
                 }
                 None => {
                     eprintln!("expand-or-fail; not writing");
@@ -48,22 +47,26 @@ fn main() {
         }
         "decode" if args.len() == 2 => {
             let blob = fs::read(&args[0]).expect("read");
-            let back = decode(&blob).expect("decode");
-            fs::write(&args[1], &back).expect("write");
-            eprintln!("decoded {}", back.len());
+            let data = decode(&blob).expect("decode");
+            fs::write(&args[1], data).expect("write");
         }
-        "stat" | "fast" | "champ" | "best" | "aware" if args.len() == 1 => {
+        "stat" | "champ" | "best" | "aware" if args.len() == 1 => {
             let raw = fs::read(&args[0]).expect("read");
-            let house = cmd == "best" || cmd == "aware";
-            set_fast(cmd == "fast");
             if cmd == "aware" {
-                eprintln!("AWARE own-path (XZ1 retired: mozilla samba sao ooffice)");
+                eprintln!("AWARE own-path (XZ1 retired)");
             }
             let t0 = std::time::Instant::now();
-            let got = if house {
+            let got = if cmd == "best" || cmd == "aware" {
                 encode_best(&raw)
             } else {
-                encode_window(&raw, window).map(|b| (b, "lbr1"))
+                encode_window(&raw, window).map(|b| {
+                    let kind = if b.len() == 8 {
+                        "tru8"
+                    } else {
+                        "lbr1"
+                    };
+                    (b, kind)
+                })
             };
             match got {
                 Some((b, kind)) => {
@@ -73,12 +76,13 @@ fn main() {
                     let dec = t1.elapsed();
                     assert_eq!(back, raw, "DECODE_OK failed");
                     println!(
-                        "{}\traw={}\tcoded={}\tratio={:.4}\tkind={}\tenc_ms={}\tdec_ms={}\tDECODE_OK",
+                        "{}\traw={}\tcoded={}\tratio={:.4}\tkind={}\tseat={}\tenc_ms={}\tdec_ms={}\tDECODE_OK",
                         args[0],
                         raw.len(),
                         b.len(),
                         b.len() as f64 / raw.len() as f64,
                         kind,
+                        splb::detect::omni_seat(kind),
                         enc.as_millis(),
                         dec.as_millis()
                     );

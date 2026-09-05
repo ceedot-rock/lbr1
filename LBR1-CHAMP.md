@@ -1,9 +1,9 @@
-# SPLv1 live champ — banked 2026-09-03
+# PCC live champ — banked 2026-09-03
 
-**SPLv1** is the product. Slid Phi Labs, version 1.
-Engines stay LBR1 / LBHX / TRU8 / TR8X / BW22.
+**PCC** — Ptaszenski Computational Codec. Slid Phi Labs.
+Engines stay LBR1 / LBHM / TRU8 / TR8X / BW22. Combined GC is not in this tree.
 
-DECODE_OK. Match cap 65,535. Chain cap **128**. Hybrid LBHX does not fire on uniform Binary.
+DECODE_OK. Match cap 65,535. Chain cap **128**. Hybrid LBHM does not fire on uniform Binary.
 
 | file | raw | coded | ratio | kind |
 |---|---:|---:|---:|---|
@@ -30,5 +30,5 @@ rep0 19.02% + rep1..3 19.51% = **38.5% total rep**
 >4096 picked 184 / 412,094 offered
 far>2MiB 15.46% / far>4MiB 10.64% / far>10MiB 5.27%
 
-Product path: `lb best` = min(TRU8, TR8X, LBR1, BW22, LBHX).
+Product path: `lb best` = min(TRU8, TR8X, LBR1, BW22, LBHM).
 mozilla / ooffice / sao stay whole-file LBR1.
