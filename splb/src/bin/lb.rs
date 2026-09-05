@@ -8,9 +8,9 @@ fn usage() -> ! {
     eprintln!("  lb encode [-w WINDOW] IN OUT");
     eprintln!("  lb decode IN OUT");
     eprintln!("  lb stat  [-w WINDOW] FILE");
-    eprintln!("  lb champ FILE               # LBR1 quality path");
-    eprintln!("  lb best  FILE               # PCC house: min(TRU8, TR8X, LBR1, BW22)");
-    eprintln!("  lb aware FILE               # same house; never xz");
+    eprintln!("  lb champ FILE [OUT]         # LBR1 quality path; optional write");
+    eprintln!("  lb best  FILE [OUT]         # PCC house: min(TRU8, TR8X, LBR1, BW22); one encode");
+    eprintln!("  lb aware FILE [OUT]         # same house; never xz");
     process::exit(2);
 }
 
@@ -50,7 +50,7 @@ fn main() {
             let data = decode(&blob).expect("decode");
             fs::write(&args[1], data).expect("write");
         }
-        "stat" | "champ" | "best" | "aware" if args.len() == 1 => {
+        "stat" | "champ" | "best" | "aware" if args.len() == 1 || args.len() == 2 => {
             let raw = fs::read(&args[0]).expect("read");
             if cmd == "aware" {
                 eprintln!("AWARE own-path (XZ1 retired)");
@@ -75,6 +75,9 @@ fn main() {
                     let back = decode(&b).expect("decode");
                     let dec = t1.elapsed();
                     assert_eq!(back, raw, "DECODE_OK failed");
+                    if args.len() == 2 {
+                        fs::write(&args[1], &b).expect("write");
+                    }
                     println!(
                         "{}\traw={}\tcoded={}\tratio={:.4}\tkind={}\tseat={}\tenc_ms={}\tdec_ms={}\tDECODE_OK",
                         args[0],
