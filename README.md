@@ -20,5 +20,4 @@ cargo build --release -p splb --bin lb
 ./target/release/lb best FILE
 ```
 
-`lb best` = public seats (ZRW + struct_text + general + mixed).  
-House (private) = those + AWARE + CDDG/ELID. Crate name is `splb`. CLI is `lb`.
+`lb best` = public seats. `lb asmd` = Altered State Morphic Distopic Encoding. UNLICENSED. Not published.

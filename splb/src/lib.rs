@@ -1,6 +1,7 @@
 //! PCC (splb) — Ptaszenski Computational Codec. Own LZ + rANS for binaries.
 //! House picker: min(LBR1, pulsar BW22).
 
+pub mod asmd;
 pub mod aware;
 pub mod detect;
 pub mod frame;
@@ -97,6 +98,14 @@ pub fn encode_best(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
 }
 
 pub fn decode(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if asmd::is_asmd(buf) {
+        return asmd::decode_frame(buf);
+    }
+    decode_gene(buf)
+}
+
+/// One gene. No ASMD header. Combined GC decode is last and optional.
+pub fn decode_gene(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
     if frame::is_tru8(buf) {
         return frame::unpack_tru8(buf);
     }
@@ -109,7 +118,16 @@ pub fn decode(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
     if buf.len() >= 4 && &buf[..4] == MAGIC {
         return decode_lbr1(buf);
     }
-    pulsar::pulsar_decode(buf)
+    if let Ok(v) = pulsar::pulsar_decode(buf) {
+        return Ok(v);
+    }
+    #[cfg(feature = "aware")]
+    {
+        if let Ok(v) = combined_gc::codec::decode(buf) {
+            return Ok(v);
+        }
+    }
+    Err("decode_gene")
 }
 
 #[cfg(test)]

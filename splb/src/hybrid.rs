@@ -73,6 +73,13 @@ pub fn is_mixed(data: &[u8]) -> bool {
     present >= 2
 }
 
+pub(crate) fn cuts(data: &[u8]) -> Vec<(usize, usize)> {
+    segments(data)
+        .into_iter()
+        .map(|s| (s.start, s.end))
+        .collect()
+}
+
 fn segments(data: &[u8]) -> Vec<Seg> {
     let mut out = Vec::new();
     let mut i = 0usize;
@@ -207,6 +214,7 @@ pub fn unpack(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
             KIND_TR8X => frame::unpack_tr8x(blob)?,
             KIND_LBR1 => crate::decode_lbr1(blob)?,
             KIND_BW22 => pulsar::pulsar_decode(blob)?,
+            5 => crate::decode_gene(blob)?,
             _ => return Err("lbhm kind"),
         };
         if part.len() != raw_len {

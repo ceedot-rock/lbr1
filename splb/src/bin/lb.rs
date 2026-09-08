@@ -11,6 +11,7 @@ fn usage() -> ! {
     eprintln!("  lb champ FILE [OUT]         # LBR1 quality path; optional write");
     eprintln!("  lb best  FILE [OUT]         # PCC house: min(TRU8, TR8X, LBR1, BW22); one encode");
     eprintln!("  lb aware FILE [OUT]         # same house; never xz");
+    eprintln!("  lb asmd [--max] [--seat bw22|lbr1|hybrid] FILE [OUT]");
     process::exit(2);
 }
 
@@ -49,6 +50,58 @@ fn main() {
             let blob = fs::read(&args[0]).expect("read");
             let data = decode(&blob).expect("decode");
             fs::write(&args[1], data).expect("write");
+        }
+        "asmd" if !args.is_empty() => {
+            let mut max = false;
+            let mut seat: Option<String> = None;
+            let mut i = 0;
+            while i < args.len() {
+                if args[i] == "--max" {
+                    max = true;
+                    args.remove(i);
+                } else if args[i] == "--seat" && i + 1 < args.len() {
+                    seat = Some(args[i + 1].clone());
+                    args.remove(i);
+                    args.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+            splb::asmd::set_force_seat(seat.as_deref());
+            if args.is_empty() || args.len() > 2 {
+                usage();
+            }
+            splb::asmd::set_kinetic(!max);
+            let raw = fs::read(&args[0]).expect("read");
+            let t0 = std::time::Instant::now();
+            match splb::asmd::encode(&raw) {
+                Some(p) => {
+                    let enc = t0.elapsed();
+                    let t1 = std::time::Instant::now();
+                    let back = splb::decode(&p.blob).expect("decode");
+                    let dec = t1.elapsed();
+                    assert_eq!(back, raw, "DECODE_OK failed");
+                    if args.len() == 2 {
+                        fs::write(&args[1], &p.blob).expect("write");
+                    }
+                    eprintln!(
+                        "asmd {} {} {} {} -> {} ({:.4}) enc={:?} dec={:?} DECODE_OK seat={}",
+                        if max { "max" } else { "kinetic-bw22" },
+                        p.morph.as_str(),
+                        p.seat.omni(),
+                        raw.len(),
+                        p.blob.len(),
+                        p.blob.len() as f64 / raw.len() as f64,
+                        enc,
+                        dec,
+                        p.seat.as_str()
+                    );
+                }
+                None => {
+                    eprintln!("asmd expand-or-fail; not writing");
+                    process::exit(1);
+                }
+            }
         }
         "stat" | "champ" | "best" | "aware" if args.len() == 1 || args.len() == 2 => {
             let raw = fs::read(&args[0]).expect("read");

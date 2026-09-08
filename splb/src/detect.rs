@@ -56,8 +56,7 @@ pub fn window_for(data: &[u8], asked: u32) -> usize {
     let n = data.len().max(256);
     match classify(data) {
         Class::Fill | Class::Sparse => 256,
-        Class::Text => (asked as usize).min(1 << 22).min(n),
-        Class::Binary => n.min(1 << 26),
+        Class::Text | Class::Binary => (asked as usize).min(1 << 22).min(n),
     }
 }
 
