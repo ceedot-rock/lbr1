@@ -1,20 +1,26 @@
-# PCC — PRIVATE
+# PCC
 
 **PCC** — Ptaszenski Computational Codec. Slid Phi Labs. Dual-licensed AGPL-3.0-or-later OR Commercial. Public source. Signing keys stay operator-only.
 
-Job: one PCC1 frame — ZERO, MATCH, BWT, CMAQ, LZ, STORE. Router is not a compressor. Law: [JOBS.md](JOBS.md).  
+Job: one PCC1 frame. Router is not a compressor. Law: [JOBS.md](JOBS.md).  
 `.pcc` is our zip (PCCZ). `lb pcc` encodes. `lb zip` / `unzip` / `ls` / `info` / `test` / `cat`.  
-Does not: dump Combined GC. Combined GC / AWARE stay in `combined-gc`. Not pulsar. Not SPH11. Not #1.  
-`lb champ` is still the LBR1 quality path (mozilla 14,796,694 lock). `lb stream` is TRUSTREAM (4 KiB STORE+ZERO).
+Does not: dump Combined GC into this tree. Combined GC / AWARE stay in `combined-gc`. Not pulsar. Not SPH11. Not #1.
 
-Live LBR1 champ (DECODE_OK):
+Tree **pcc-0.13.0** adds own genes LZM1, ZMX1, STR1, NNC1. Official Silesia numbers below are **pcc-0.12.1**.
 
-- mozilla 51,220,480 → **14,796,694** (ratio 0.2889)
-- ooffice 6,152,192 → **2,674,974** (ratio 0.4348)
+## Official Silesia (12 whole files, DECODE_OK)
+
+Raw 211,938,580.
+
+| Pathway | Packed | Notes |
+|---|---:|---|
+| pulsar 2.5.0 | **55,745,438** | Matches OSCB |
+| PCC | **51,498,645** | Own codec. Beats pulsar. Loses to xz-6 (~49.4M) |
+| champ mozilla lock | **14,796,694** | MATCH path, not the 12-file total |
+
+`lb champ` is the LBR1 quality path (mozilla stays MATCH). `lb stream` is TRUSTREAM (4 KiB STORE+ZERO). `lb best` is house min(). `lb aware` is house + Combined GC own-path.
 
 Zeros flagship: 40,000 B → **8 B** T_ZERO DECODE_OK.
-
-cap128 beam-4 scalar DP. See `LBR1-CHAMP.md`.
 
 ```
 cargo build --release -p splb --bin lb
@@ -25,6 +31,8 @@ cargo build --release -p splb --bin lb
 ./target/release/lb stream FILE
 ./target/release/lb champ FILE
 ./target/release/lb best FILE
+./target/release/lb lzm FILE
+./target/release/lb zmix FILE
+./target/release/lb str FILE
+./target/release/lb nnc FILE
 ```
-
-`lb pcc` encodes PCC (PCC1 frame, or a `.pcc` archive if the input is a directory). `lb process` = Codex Regular ↔ Dark. `lb champ` is LBR1 quality. UNLICENSED. Not published.

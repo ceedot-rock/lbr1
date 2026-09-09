@@ -1,5 +1,7 @@
-//! PCC (splb) — Ptaszenski Computational Codec. Own LZ + rANS for binaries.
-//! House picker: min(LBR1, pulsar BW22).
+//! PCC (splb) — Ptaszenski Computational Codec.
+//! House min(): TRU8/TR8X, LBR1, pulsar BW22, LZW1, LZM1, STR1, PCAQ,
+//! ZMX1 (≤1 MiB), NNC1 (≤256 KiB), PCC1, Combined GC own-path, GSS1.
+//! Host xz/gzip/bzip and GPL paq are opponents, not occupants.
 
 pub mod asmd;
 pub mod autonoma;
@@ -179,7 +181,7 @@ pub fn decode_lbr1(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
     Ok(out)
 }
 
-/// House: smaller of LBR1 and pulsar (BW22 / OZL2). Both gated.
+/// House min() of own DECODE_OK genes. Router, not a compressor.
 pub fn encode_best(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
     let mut best: Option<(Vec<u8>, &'static str)> = None;
     if let Some(a) = encode(data) {
