@@ -5,22 +5,30 @@ pub mod asmd;
 pub mod autonoma;
 pub mod aware;
 pub mod codex;
+pub mod crc;
 pub mod detect;
 pub mod frame;
+pub mod guess;
 pub mod hybrid;
+pub mod lzm;
+pub mod mathstore;
+pub mod nnc;
 pub mod parse;
 pub mod pcc;
 pub mod pccaq;
+pub mod phrases;
 pub mod pccz;
 pub mod rans;
+pub mod structx;
 pub mod wrap;
 pub mod rans_o1;
 pub mod range;
 pub mod rans_op;
 pub mod sensors;
 pub mod sentinel;
+pub mod zmix;
 
-pub const VERSION: &str = "pcc-0.11.0";
+pub const VERSION: &str = "pcc-0.13.0";
 pub const MAGIC: &[u8; 4] = frame::MAGIC;
 
 pub fn version() -> &'static str {
@@ -34,6 +42,8 @@ pub fn encode(data: &[u8]) -> Option<Vec<u8>> {
 pub fn blob_kind(b: &[u8]) -> &'static str {
     if pccz::is_pccz(b) {
         "pccz"
+    } else if pcc::is_pcc(b) {
+        "pcc1"
     } else if frame::is_tru8(b) {
         "tru8"
     } else if frame::is_tr8x(b) {
@@ -46,6 +56,16 @@ pub fn blob_kind(b: &[u8]) -> &'static str {
         "lzw1"
     } else if wrap::is_paq(b) {
         "pcaq"
+    } else if lzm::is_lzm(b) {
+        "lzm1"
+    } else if zmix::is_zmix(b) {
+        "zmx1"
+    } else if nnc::is_nnc(b) {
+        "nnc1"
+    } else if structx::is_str(b) {
+        "str1"
+    } else if guess::is_guess(b) {
+        "gss1"
     } else {
         "lbr1"
     }
@@ -203,6 +223,49 @@ pub fn encode_best(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
             _ => {}
         }
     }
+    if let Some(p) = pcc::encode(data) {
+        match &best {
+            None => best = Some((p, "pcc1")),
+            Some((a, _)) if p.len() < a.len() => best = Some((p, "pcc1")),
+            _ => {}
+        }
+    }
+    if let Some(z) = lzm::encode(data) {
+        match &best {
+            None => best = Some((z, "lzm1")),
+            Some((a, _)) if z.len() < a.len() => best = Some((z, "lzm1")),
+            _ => {}
+        }
+    }
+    if let Some(s) = structx::encode(data) {
+        match &best {
+            None => best = Some((s, "str1")),
+            Some((a, _)) if s.len() < a.len() => best = Some((s, "str1")),
+            _ => {}
+        }
+    }
+    let still_open = match &best {
+        None => true,
+        Some((a, _)) => (a.len() as f64) / (data.len() as f64) > 0.35,
+    };
+    if still_open && data.len() <= zmix::HOUSE_MAX {
+        if let Some(z) = zmix::encode(data) {
+            match &best {
+                None => best = Some((z, "zmx1")),
+                Some((a, _)) if z.len() < a.len() => best = Some((z, "zmx1")),
+                _ => {}
+            }
+        }
+    }
+    if still_open && data.len() <= nnc::HOUSE_MAX {
+        if let Some(z) = nnc::encode(data) {
+            match &best {
+                None => best = Some((z, "nnc1")),
+                Some((a, _)) if z.len() < a.len() => best = Some((z, "nnc1")),
+                _ => {}
+            }
+        }
+    }
     let still_open = match &best {
         None => true,
         Some((a, _)) => (a.len() as f64) / (data.len() as f64) > 0.35,
@@ -216,7 +279,44 @@ pub fn encode_best(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
             }
         }
     }
+    let near_store = match &best {
+        None => true,
+        Some((a, _)) => (a.len() as f64) / (data.len() as f64) > 0.88,
+    };
+    if near_store {
+        if let Some(g) = guess::encode(data) {
+            match &best {
+                None => best = Some((g, "gss1")),
+                Some((a, _)) if g.len() < a.len() => best = Some((g, "gss1")),
+                _ => {}
+            }
+        }
+    }
     best
+}
+
+/// One archive member. Fill stays 8-byte TRU8. Else a PCC1 frame, else house min, else store.
+pub fn compress_member(raw: &[u8]) -> (Vec<u8>, bool) {
+    if raw.is_empty() {
+        return (Vec::new(), true);
+    }
+    if let Some((sym, n)) = frame::solid_run(raw) {
+        let blob = frame::pack_tru8(sym, n);
+        if decode_lbr1(&blob).ok().as_deref() == Some(raw) {
+            return (blob, false);
+        }
+    }
+    if let Some(p) = pcc::encode(raw) {
+        if p.len() < raw.len() {
+            return (p, false);
+        }
+    }
+    if let Some((b, _)) = encode_best(raw) {
+        if b.len() < raw.len() && decode(&b).ok().as_deref() == Some(raw) {
+            return (b, false);
+        }
+    }
+    (raw.to_vec(), true)
 }
 
 fn host_skin(buf: &[u8]) -> bool {
@@ -286,6 +386,21 @@ pub fn decode_gene(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
     }
     if wrap::is_paq(buf) {
         return wrap::paq_decode(buf);
+    }
+    if lzm::is_lzm(buf) {
+        return lzm::decode(buf);
+    }
+    if zmix::is_zmix(buf) {
+        return zmix::decode(buf);
+    }
+    if nnc::is_nnc(buf) {
+        return nnc::decode(buf);
+    }
+    if structx::is_str(buf) {
+        return structx::decode(buf);
+    }
+    if guess::is_guess(buf) {
+        return guess::decode(buf);
     }
     if buf.len() >= 4 && &buf[..4] == MAGIC {
         return decode_lbr1(buf);

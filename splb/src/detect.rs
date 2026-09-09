@@ -97,14 +97,51 @@ pub fn omni_seat(kind: &str) -> &'static str {
     match kind {
         "tru8" | "tr8x" | "zero" => "ZRW_delegate",
         "bw22" | "bwt" => "struct_text",
-        "lbr1" | "match" | "lzw1" => "general",
-        "cmaq" | "pcaq" => "paq",
+        "lbr1" | "match" | "lzw1" | "lzm1" => "general",
+        "cmaq" | "pcaq" | "zmx1" | "nnc1" => "paq",
+        "str1" => "struct_text",
         "lbhm" | "seam" => "mixed",
         "store" | "stream" => "store",
+        "phrase" => "store",
+        "math" => "store",
         "elide" | "arth" => "CDDG",
         "gc" | "aware" | "gcr1" => "AWARE",
         _ => "general",
     }
+}
+
+/// Scout only: little-endian u32 arithmetic run. Not a gene — Autonoma may
+/// skip BWT on formula-shaped integers (mzip's "store the formula" as a *route*).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Formula {
+    pub start: u32,
+    pub step: u32,
+    pub n: usize,
+}
+
+pub fn arithmetic_u32_le(data: &[u8]) -> Option<Formula> {
+    if data.len() < 64 {
+        return None;
+    }
+    let n = data.len() / 4;
+    if n < 16 {
+        return None;
+    }
+    let at = |i: usize| -> u32 {
+        u32::from_le_bytes(data[i * 4..i * 4 + 4].try_into().unwrap())
+    };
+    let a = at(0);
+    let b = at(1);
+    let step = b.wrapping_sub(a);
+    if step == 0 {
+        return None;
+    }
+    for i in 2..n {
+        if at(i) != a.wrapping_add(step.wrapping_mul(i as u32)) {
+            return None;
+        }
+    }
+    Some(Formula { start: a, step, n })
 }
 
 pub fn classify(data: &[u8]) -> Class {
@@ -154,6 +191,19 @@ mod tests {
             .map(|i| (i.wrapping_mul(1103515245).wrapping_add(12345) >> 16) as u8)
             .collect();
         assert!(shannon(&r) > 7.0, "H={}", shannon(&r));
+    }
+
+    #[test]
+    fn arithmetic_ids_are_a_formula() {
+        let mut buf = Vec::new();
+        for i in 0u32..64 {
+            buf.extend_from_slice(&(1000 + i * 3).to_le_bytes());
+        }
+        let f = arithmetic_u32_le(&buf).expect("formula");
+        assert_eq!(f.start, 1000);
+        assert_eq!(f.step, 3);
+        assert_eq!(f.n, 64);
+        assert!(arithmetic_u32_le(&[1, 2, 3, 9, 8, 7]).is_none());
     }
 
     #[test]

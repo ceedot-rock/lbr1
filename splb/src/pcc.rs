@@ -4,17 +4,26 @@
 //! MATCH LBR1 parse + pack
 //! BWT   pulsar BW22
 //! CMAQ  own mixer (PCCaq). Not paq8px. Not xz.
+//! LZ    own LZ wrap (LZW1)
+//! LZM   own LZMA-style (LZM1). Not host xz.
+//! ZMIX  own zpaq-style mixer (ZMX1)
+//! STR   own structure transform (STR1)
+//! NNC   own online neural (NNC1)
 //! STORE raw tile
 //!
 //! Smallest own DECODE_OK op wins. Combined GC is not an op. Host xz is not an op.
+//! v2 frames carry IEEE CRC-32 of the raw. v1 still decodes.
 
+use crate::crc;
 use crate::decode_lbr1;
 use crate::detect;
 use crate::frame;
 use crate::parse;
+use crate::wrap;
 
 pub const MAGIC: &[u8; 4] = b"PCC1";
-pub const VER: u8 = 1;
+pub const VER: u8 = 2;
+pub const VER_MIN: u8 = 1;
 /// TRUSTREAM tile.
 pub const TILE: usize = 4096;
 /// MATCH window = champ (4 MiB). PCC is the quality path.
@@ -28,6 +37,15 @@ pub enum Op {
     Bwt = 2,
     Store = 3,
     Cmaq = 4,
+    Lz = 5,
+    Lzm = 6,
+    Zmix = 7,
+    Str = 8,
+    Nnc = 9,
+    /// Seekable log codes (phrases.rs). TRUSTREAM only. Not a Silesia gene.
+    Phrase = 10,
+    /// Closed generator (mathstore.rs). Formula, not tape. When STORE would dump.
+    Math = 11,
 }
 
 impl Op {
@@ -38,6 +56,13 @@ impl Op {
             2 => Ok(Op::Bwt),
             3 => Ok(Op::Store),
             4 => Ok(Op::Cmaq),
+            5 => Ok(Op::Lz),
+            6 => Ok(Op::Lzm),
+            7 => Ok(Op::Zmix),
+            8 => Ok(Op::Str),
+            9 => Ok(Op::Nnc),
+            10 => Ok(Op::Phrase),
+            11 => Ok(Op::Math),
             _ => Err("pcc op"),
         }
     }
@@ -49,6 +74,13 @@ impl Op {
             Op::Bwt => "bwt",
             Op::Store => "store",
             Op::Cmaq => "cmaq",
+            Op::Lz => "lz",
+            Op::Lzm => "lzm",
+            Op::Zmix => "zmix",
+            Op::Str => "str",
+            Op::Nnc => "nnc",
+            Op::Phrase => "phrase",
+            Op::Math => "math",
         }
     }
 }
@@ -61,7 +93,7 @@ pub struct Block {
 }
 
 pub fn is_pcc(buf: &[u8]) -> bool {
-    buf.len() >= 13 && buf.starts_with(MAGIC) && buf[4] == VER
+    buf.len() >= 13 && buf.starts_with(MAGIC) && buf[4] >= VER_MIN && buf[4] <= VER
 }
 
 fn put_u32(out: &mut Vec<u8>, n: u32) {
@@ -77,10 +109,11 @@ fn take_u32(buf: &[u8], i: &mut usize) -> Result<u32, &'static str> {
     Ok(n)
 }
 
-pub fn pack(raw_len: u32, blocks: &[Block]) -> Vec<u8> {
+pub fn pack(raw: &[u8], blocks: &[Block]) -> Vec<u8> {
     let mut out = Vec::from(*MAGIC);
     out.push(VER);
-    put_u32(&mut out, raw_len);
+    put_u32(&mut out, raw.len() as u32);
+    put_u32(&mut out, crc::crc32(raw));
     put_u32(&mut out, blocks.len() as u32);
     for b in blocks {
         out.push(b.op as u8);
@@ -91,12 +124,18 @@ pub fn pack(raw_len: u32, blocks: &[Block]) -> Vec<u8> {
     out
 }
 
-pub fn unpack(buf: &[u8]) -> Result<(u32, Vec<Block>), &'static str> {
+pub fn unpack(buf: &[u8]) -> Result<(u32, Option<u32>, Vec<Block>), &'static str> {
     if !is_pcc(buf) {
         return Err("not PCC1");
     }
+    let ver = buf[4];
     let mut i = 5usize;
     let raw_len = take_u32(buf, &mut i)?;
+    let crc = if ver >= 2 {
+        Some(take_u32(buf, &mut i)?)
+    } else {
+        None
+    };
     let n = take_u32(buf, &mut i)? as usize;
     let mut blocks = Vec::with_capacity(n);
     for _ in 0..n {
@@ -120,7 +159,7 @@ pub fn unpack(buf: &[u8]) -> Result<(u32, Vec<Block>), &'static str> {
     if i != buf.len() {
         return Err("pcc tail");
     }
-    Ok((raw_len, blocks))
+    Ok((raw_len, crc, blocks))
 }
 
 fn try_zero(data: &[u8]) -> Option<Vec<u8>> {
@@ -214,6 +253,13 @@ fn decode_op(op: Op, blob: &[u8], raw_len: usize) -> Result<Vec<u8>, &'static st
         Op::Match => decode_lbr1(blob),
         Op::Bwt => pulsar::bwt_ans::decompress(blob).map_err(|_| "pcc bwt"),
         Op::Cmaq => crate::pccaq::decode(blob),
+        Op::Lz => wrap::lz_decode(blob),
+        Op::Lzm => crate::lzm::decode(blob),
+        Op::Zmix => crate::zmix::decode(blob),
+        Op::Str => crate::structx::decode(blob),
+        Op::Nnc => crate::nnc::decode(blob),
+        Op::Phrase => crate::phrases::decode(blob),
+        Op::Math => crate::mathstore::decode(blob),
         Op::Store => {
             if blob.len() != raw_len {
                 return Err("pcc store len");
@@ -229,6 +275,20 @@ fn store_block(data: &[u8]) -> Block {
         raw_len: data.len() as u32,
         blob: data.to_vec(),
     }
+}
+
+/// STORE last. If a closed generator rebuilds the tile smaller, keep that.
+fn store_or_math(data: &[u8]) -> Block {
+    if let Some(m) = crate::mathstore::encode(data) {
+        if m.len() < data.len() && crate::mathstore::decode(&m).ok().as_deref() == Some(data) {
+            return Block {
+                op: Op::Math,
+                raw_len: data.len() as u32,
+                blob: m,
+            };
+        }
+    }
+    store_block(data)
 }
 
 fn block(op: Op, data: &[u8], blob: Vec<u8>) -> Block {
@@ -249,6 +309,10 @@ fn take_smaller(best: &mut Option<Block>, b: Block) {
 
 fn try_cmaq(data: &[u8]) -> Option<Vec<u8>> {
     crate::pccaq::encode(data)
+}
+
+fn try_lz(data: &[u8]) -> Option<Vec<u8>> {
+    wrap::lz_encode(data).filter(|b| b.len() < data.len())
 }
 
 fn zero_block(data: &[u8]) -> Option<Block> {
@@ -356,7 +420,32 @@ fn pick_one(data: &[u8], class: detect::Class, plan: &crate::autonoma::Plan) -> 
             }
         }
     }
-    best.unwrap_or_else(|| store_block(data))
+    let open = best
+        .as_ref()
+        .map(|b| (b.blob.len() as f64) / (data.len() as f64) > 0.50)
+        .unwrap_or(true);
+    if open {
+        if let Some(z) = try_lz(data) {
+            take_smaller(&mut best, block(Op::Lz, data, z));
+        }
+        if let Some(z) = crate::lzm::encode(data) {
+            take_smaller(&mut best, block(Op::Lzm, data, z));
+        }
+        if let Some(z) = crate::structx::encode(data) {
+            take_smaller(&mut best, block(Op::Str, data, z));
+        }
+        if data.len() <= crate::zmix::HOUSE_MAX {
+            if let Some(z) = crate::zmix::encode(data) {
+                take_smaller(&mut best, block(Op::Zmix, data, z));
+            }
+        }
+        if data.len() <= crate::nnc::HOUSE_MAX {
+            if let Some(z) = crate::nnc::encode(data) {
+                take_smaller(&mut best, block(Op::Nnc, data, z));
+            }
+        }
+    }
+    best.unwrap_or_else(|| store_or_math(data))
 }
 
 /// PCC law: smallest own DECODE_OK composition. Autonoma picks the seat.
@@ -390,7 +479,7 @@ fn pick_blocks(data: &[u8]) -> Vec<Block> {
 }
 
 fn frame_from_blocks(data: &[u8], blocks: Vec<Block>) -> Option<Vec<u8>> {
-    Some(pack(data.len() as u32, &blocks))
+    Some(pack(data, &blocks))
 }
 
 /// Pack only. Handshake is `decode` at the CLI / `encode`.
@@ -408,11 +497,22 @@ pub fn encode_frame(data: &[u8], stream: bool) -> Option<(Vec<u8>, &'static str)
                     blob: z,
                 });
             } else {
-                blocks.push(Block {
-                    op: Op::Store,
-                    raw_len: chunk.len() as u32,
-                    blob: chunk.to_vec(),
-                });
+                let math = store_or_math(chunk);
+                if math.op == Op::Math {
+                    blocks.push(math);
+                } else if let Some(p) = crate::phrases::encode(chunk) {
+                    if crate::phrases::decode(&p).ok().as_deref() == Some(chunk) {
+                        blocks.push(Block {
+                            op: Op::Phrase,
+                            raw_len: chunk.len() as u32,
+                            blob: p,
+                        });
+                    } else {
+                        blocks.push(math);
+                    }
+                } else {
+                    blocks.push(math);
+                }
             }
         }
         let out = frame_from_blocks(data, blocks)?;
@@ -424,7 +524,7 @@ pub fn encode_frame(data: &[u8], stream: bool) -> Option<(Vec<u8>, &'static str)
     } else {
         "seam"
     };
-    let out = pack(data.len() as u32, &blocks);
+    let out = pack(data, &blocks);
     Some((out, tag))
 }
 
@@ -437,7 +537,8 @@ pub fn encode(data: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// TRUSTREAM: 4 KiB tiles, STORE + ZERO only. Not a Silesia contestant.
+/// TRUSTREAM: 4 KiB tiles. ZERO fill, PHRASE on repeated logs, else STORE.
+/// PHRASE is seekable line codes — not LZ, not a Silesia contestant.
 pub fn encode_stream(data: &[u8]) -> Option<Vec<u8>> {
     let (out, _) = encode_frame(data, true)?;
     match decode(&out) {
@@ -447,49 +548,40 @@ pub fn encode_stream(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 pub fn decode(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
-    if !is_pcc(buf) {
-        return Err("not PCC1");
-    }
-    let mut i = 5usize;
-    let raw_len = take_u32(buf, &mut i)? as usize;
-    let n = take_u32(buf, &mut i)? as usize;
-    let mut out = Vec::with_capacity(raw_len);
-    for _ in 0..n {
-        if i >= buf.len() {
-            return Err("pcc trunc");
+    let (raw_len, crc, blocks) = unpack(buf)?;
+    let mut out = Vec::with_capacity(raw_len as usize);
+    for b in &blocks {
+        let piece = decode_op(b.op, &b.blob, b.raw_len as usize)?;
+        if piece.len() != b.raw_len as usize {
+            return Err("pcc piece");
         }
-        let op = Op::from_u8(buf[i])?;
-        i += 1;
-        let rl = take_u32(buf, &mut i)? as usize;
-        let bl = take_u32(buf, &mut i)? as usize;
-        if i + bl > buf.len() {
-            return Err("pcc blob");
-        }
-        let blob = &buf[i..i + bl];
-        i += bl;
-        match op {
-            Op::Store => {
-                if blob.len() != rl {
-                    return Err("pcc store len");
-                }
-                out.extend_from_slice(blob);
-            }
-            _ => {
-                let piece = decode_op(op, blob, rl)?;
-                if piece.len() != rl {
-                    return Err("pcc piece");
-                }
-                out.extend_from_slice(&piece);
-            }
-        }
+        out.extend_from_slice(&piece);
     }
-    if i != buf.len() {
-        return Err("pcc tail");
-    }
-    if out.len() != raw_len {
+    if out.len() != raw_len as usize {
         return Err("pcc raw_len");
     }
+    if let Some(c) = crc {
+        if crc::crc32(&out) != c {
+            return Err("pcc crc");
+        }
+    }
     Ok(out)
+}
+
+pub fn describe(buf: &[u8]) -> Result<String, &'static str> {
+    let (raw_len, crc, blocks) = unpack(buf)?;
+    let packed = buf.len();
+    let ops: Vec<&str> = blocks.iter().map(|b| b.op.name()).collect();
+    Ok(format!(
+        "pcc1 ver={} raw={} packed={} ratio={:.4} crc={} blocks={} ops={}",
+        buf[4],
+        raw_len,
+        packed,
+        if raw_len == 0 { 0.0 } else { packed as f64 / raw_len as f64 },
+        crc.map(|c| format!("{c:08x}")).unwrap_or_else(|| "-".into()),
+        blocks.len(),
+        ops.join(",")
+    ))
 }
 
 /// Kind tag for CLI. Pack only — caller does DECODE_OK.
@@ -506,7 +598,7 @@ mod tests {
         let s = vec![0u8; 4096];
         let e = encode(&s).expect("pcc zeros");
         assert!(is_pcc(&e));
-        let (_, blocks) = unpack(&e).unwrap();
+        let (_, _, blocks) = unpack(&e).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].op, Op::Zero);
         assert_eq!(blocks[0].blob.len(), 1);
@@ -518,7 +610,7 @@ mod tests {
     fn stream_two_zero_tiles() {
         let s = vec![0u8; 8192];
         let e = encode_stream(&s).expect("stream");
-        let (_, blocks) = unpack(&e).unwrap();
+        let (_, _, blocks) = unpack(&e).unwrap();
         assert_eq!(blocks.len(), 2);
         assert!(blocks.iter().all(|b| b.op == Op::Zero));
         assert_eq!(decode(&e).unwrap(), s);
@@ -531,7 +623,7 @@ mod tests {
             .collect();
         let e = encode(&s).expect("pcc");
         assert_eq!(decode(&e).unwrap(), s);
-        let (_, blocks) = unpack(&e).unwrap();
+        let (_, _, blocks) = unpack(&e).unwrap();
         assert_eq!(blocks[0].op, Op::Store);
     }
 
@@ -553,11 +645,50 @@ mod tests {
     }
 
     #[test]
+    fn stream_math_on_ids() {
+        let mut s = Vec::new();
+        while s.len() < TILE {
+            let i = (s.len() / 4) as u32;
+            s.extend_from_slice(&(1000 + i * 3).to_le_bytes());
+        }
+        s.truncate(TILE);
+        let e = encode_stream(&s).expect("stream ids");
+        let (_, _, blocks) = unpack(&e).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].op, Op::Math);
+        assert!(blocks[0].blob.len() < 32);
+        assert_eq!(decode(&e).unwrap(), s);
+    }
+
+    #[test]
+    fn stream_phrase_on_logs() {
+        let line = b"INFO agent rider spend cents=8 service=analyze seq=";
+        let mut s = Vec::new();
+        for i in 0..120 {
+            s.extend_from_slice(line);
+            s.extend_from_slice(format!("{i}\n").as_bytes());
+        }
+        while s.len() < TILE {
+            s.extend_from_slice(line);
+            s.push(b'\n');
+        }
+        s.truncate(TILE);
+        let e = encode_stream(&s).expect("stream logs");
+        let (_, _, blocks) = unpack(&e).unwrap();
+        assert!(blocks.iter().any(|b| b.op == Op::Phrase || b.op == Op::Store));
+        assert_eq!(decode(&e).unwrap(), s);
+        if let Some(p) = blocks.iter().find(|b| b.op == Op::Phrase) {
+            let line0 = crate::phrases::decode_line(&p.blob, 0).unwrap();
+            assert!(line0.starts_with(b"INFO agent"));
+        }
+    }
+
+    #[test]
     fn stream_zero_then_store() {
         let mut s = vec![0u8; TILE];
         s.extend((0..TILE as u32).map(|i| (i.wrapping_mul(1103515245).wrapping_add(12345) >> 16) as u8));
         let e = encode_stream(&s).expect("stream mixed");
-        let (_, blocks) = unpack(&e).unwrap();
+        let (_, _, blocks) = unpack(&e).unwrap();
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].op, Op::Zero);
         assert_eq!(blocks[1].op, Op::Store);
@@ -571,8 +702,8 @@ mod tests {
         let e = encode(&s).expect("pcc text");
         assert!(is_pcc(&e));
         assert!(e.len() < s.len());
-        let (_, blocks) = unpack(&e).unwrap();
-        assert!(matches!(blocks[0].op, Op::Match | Op::Bwt | Op::Cmaq));
+        let (_, _, blocks) = unpack(&e).unwrap();
+        assert_ne!(blocks[0].op, Op::Store);
         assert_eq!(decode(&e).unwrap(), s);
     }
 
@@ -588,7 +719,7 @@ mod tests {
         }
         let e = encode(&s).expect("pcc");
         assert_eq!(decode(&e).unwrap(), s);
-        let (_, blocks) = unpack(&e).unwrap();
+        let (_, _, blocks) = unpack(&e).unwrap();
         assert_eq!(blocks.len(), 1, "BWT seat must stay one block, got {}", blocks.len());
         assert_ne!(blocks[0].op, Op::Store);
     }
@@ -601,7 +732,7 @@ mod tests {
         assert!(is_pcc(&e));
         assert_eq!(decode(&e).unwrap(), s);
         assert!(e.len() < s.len());
-        let (_, blocks) = unpack(&e).unwrap();
+        let (_, _, blocks) = unpack(&e).unwrap();
         assert!(blocks.iter().any(|b| b.op == Op::Zero) || blocks.len() == 1);
     }
 
@@ -614,5 +745,33 @@ mod tests {
         let e = encode(&s).expect("pcc ints");
         assert_eq!(decode(&e).unwrap(), s);
         assert!(e.len() < s.len());
+    }
+
+    #[test]
+    fn v2_carries_crc() {
+        let s = b"the cat sat on the mat. ".repeat(80);
+        let e = encode(&s).expect("pcc");
+        assert_eq!(e[4], VER);
+        let (raw_len, crc, _) = unpack(&e).unwrap();
+        assert_eq!(raw_len as usize, s.len());
+        assert_eq!(crc, Some(crc::crc32(&s)));
+        let mut bad = e.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        assert!(decode(&bad).is_err());
+    }
+
+    #[test]
+    fn v1_still_decodes() {
+        let s = vec![0u8; 64];
+        let mut v1 = Vec::from(*MAGIC);
+        v1.push(1);
+        v1.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        v1.extend_from_slice(&1u32.to_le_bytes());
+        v1.push(Op::Zero as u8);
+        v1.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        v1.extend_from_slice(&1u32.to_le_bytes());
+        v1.push(0);
+        assert_eq!(decode(&v1).unwrap(), s);
     }
 }

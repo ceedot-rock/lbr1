@@ -13,12 +13,19 @@ fn usage() -> ! {
     eprintln!("  lb stat  [-w WINDOW] FILE");
     eprintln!("  lb champ FILE [OUT]         # LBR1 + BW22; mozilla stays MATCH");
     eprintln!("  lb process FILE [OUT]       # Codex: flip Regular ↔ Dark, mirror=0");
-    eprintln!("  lb pcc   FILE [OUT]         # AWARE archive: PCC house");
-    eprintln!("  lb stream FILE [OUT]        # AWARE stream: 4 KiB ZERO+STORE");
+    eprintln!("  lb pcc   IN [OUT]           # PCC codec. File → PCC1. Dir → .pcc archive");
+    eprintln!("  lb stream FILE [OUT]        # TRUSTREAM: 4 KiB ZERO+MATH+PHRASE+STORE");
+    eprintln!("  lb info  FILE               # PCC1 blocks or .pcc listing");
+    eprintln!("  lb test  FILE               # DECODE_OK / CRC");
+    eprintln!("  lb cat   FILE [MEMBER]      # write decoded bytes to stdout");
     eprintln!("  lb best  FILE [OUT]         # min(TRU8, TR8X, LBR1, BW22); one encode");
     eprintln!("  lb aware FILE [OUT]         # house min(): LBR1, pulsar, wraps, Combined GC");
     eprintln!("  lb lz    FILE [OUT]         # own LZ wrap");
     eprintln!("  lb paq   FILE [OUT]         # own PAQ wrap (PCCaq)");
+    eprintln!("  lb lzm   FILE [OUT]         # own LZMA-style (not host xz)");
+    eprintln!("  lb zmix  FILE [OUT]         # own zpaq-style mixer");
+    eprintln!("  lb str   FILE [OUT]         # own structure transform");
+    eprintln!("  lb nnc   FILE [OUT]         # own online neural predictor");
     eprintln!("  lb gc    FILE [OUT]         # Combined GC own-path (Max, own skins)");
     eprintln!("  lb asmd [--max] [--seat bw22|lbr1|hybrid] FILE [OUT]");
     eprintln!("  lb zip   OUT.pcc PATH [PATH...]   # our zip: many files, one .pcc");
@@ -190,7 +197,158 @@ fn main() {
                 }
             }
         }
-        "process" | "pcc" | "stream" if args.len() == 1 || args.len() == 2 => {
+        "pcc" if !args.is_empty() => {
+            let t0 = std::time::Instant::now();
+            let in_path = Path::new(&args[0]);
+            if in_path.is_dir() || args.len() > 2 {
+                let out_path = if args.len() >= 2 && !Path::new(&args[1]).is_dir() && args[1].ends_with(".pcc") {
+                    PathBuf::from(&args[1])
+                } else if args.len() == 1 {
+                    PathBuf::from(format!("{}.pcc", in_path.file_name().unwrap().to_string_lossy()))
+                } else {
+                    PathBuf::from(&args[args.len() - 1])
+                };
+                let sources = if args.len() >= 2 && args.last().unwrap().ends_with(".pcc") {
+                    &args[..args.len() - 1]
+                } else {
+                    &args[..]
+                };
+                let mut members = Vec::new();
+                for a in sources {
+                    let p = Path::new(a);
+                    let top = p
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| a.clone());
+                    collect_path(p, &top, &mut members);
+                }
+                if members.is_empty() {
+                    eprintln!("pcc: no files");
+                    process::exit(1);
+                }
+                let blob = pccz::zip_bytes(&members).expect("zip");
+                let back = pccz::unzip_bytes(&blob).expect("unzip check");
+                assert_eq!(back.len(), members.len(), "DECODE_OK member count");
+                fs::write(&out_path, &blob).expect("write");
+                let raw: u64 = members.iter().map(|m| m.data.len() as u64).sum();
+                println!(
+                    "{}\tmembers={}\traw={}\tcoded={}\tratio={:.4}\tkind=pccz\tms={}\tDECODE_OK",
+                    out_path.display(),
+                    members.len(),
+                    raw,
+                    blob.len(),
+                    if raw == 0 { 0.0 } else { blob.len() as f64 / raw as f64 },
+                    t0.elapsed().as_millis()
+                );
+            } else {
+                let raw = fs::read(in_path).expect("read");
+                match splb::pcc::encode(&raw) {
+                    Some(b) => {
+                        let back = splb::pcc::decode(&b).expect("decode");
+                        assert_eq!(back, raw, "DECODE_OK failed");
+                        if args.len() == 2 {
+                            fs::write(&args[1], &b).expect("write");
+                        }
+                        println!(
+                            "{}\t{}\traw={}\tcoded={}\tratio={:.4}\tms={}\tDECODE_OK",
+                            args[0],
+                            splb::pcc::describe(&b).unwrap_or_else(|_| "pcc1".into()),
+                            raw.len(),
+                            b.len(),
+                            if raw.is_empty() { 0.0 } else { b.len() as f64 / raw.len() as f64 },
+                            t0.elapsed().as_millis()
+                        );
+                    }
+                    None => {
+                        println!("{}\traw={}\tcoded=FAIL", args[0], raw.len());
+                        process::exit(1);
+                    }
+                }
+            }
+        }
+        "info" if args.len() == 1 => {
+            let blob = fs::read(&args[0]).expect("read");
+            if pccz::is_pccz(&blob) {
+                let list = pccz::list_bytes(&blob).expect("ls");
+                println!("kind=pccz\tfile={}\tbytes={}\tmembers={}", args[0], blob.len(), list.len());
+                println!("name\traw\tpacked\toccupant\tflags");
+                for e in list {
+                    let flag = if e.dir {
+                        "dir"
+                    } else if e.stored {
+                        "store"
+                    } else {
+                        "pack"
+                    };
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        e.name, e.raw_len, e.packed_len, e.occupant, flag
+                    );
+                }
+            } else if splb::pcc::is_pcc(&blob) {
+                println!("{}\t{}", args[0], splb::pcc::describe(&blob).expect("describe"));
+            } else {
+                println!(
+                    "{}\tkind={}\tbytes={}",
+                    args[0],
+                    blob_kind(&blob),
+                    blob.len()
+                );
+            }
+        }
+        "test" if args.len() == 1 => {
+            let blob = fs::read(&args[0]).expect("read");
+            if pccz::is_pccz(&blob) {
+                let members = pccz::unzip_bytes(&blob).expect("unzip");
+                println!("{}\tkind=pccz\tmembers={}\tDECODE_OK", args[0], members.len());
+            } else if splb::pcc::is_pcc(&blob) {
+                let raw = splb::pcc::decode(&blob).expect("decode");
+                println!(
+                    "{}\tkind=pcc1\traw={}\tpacked={}\tDECODE_OK",
+                    args[0],
+                    raw.len(),
+                    blob.len()
+                );
+            } else {
+                let raw = decode(&blob).expect("decode");
+                println!(
+                    "{}\tkind={}\traw={}\tpacked={}\tDECODE_OK",
+                    args[0],
+                    blob_kind(&blob),
+                    raw.len(),
+                    blob.len()
+                );
+            }
+        }
+        "cat" if args.len() == 1 || args.len() == 2 => {
+            let blob = fs::read(&args[0]).expect("read");
+            if pccz::is_pccz(&blob) {
+                let members = pccz::unzip_bytes(&blob).expect("unzip");
+                if args.len() == 2 {
+                    let want = &args[1];
+                    let m = members
+                        .iter()
+                        .find(|m| m.name == *want)
+                        .unwrap_or_else(|| panic!("no member {want}"));
+                    use std::io::Write;
+                    std::io::stdout().write_all(&m.data).expect("write");
+                } else {
+                    let files: Vec<_> = members.iter().filter(|m| !m.dir).collect();
+                    if files.len() == 1 {
+                        use std::io::Write;
+                        std::io::stdout().write_all(&files[0].data).expect("write");
+                    } else {
+                        eprintln!("cat: name a member ({} files)", files.len());
+                        process::exit(2);
+                    }
+                }
+            } else {
+                let raw = decode(&blob).expect("decode");
+                use std::io::Write;
+                std::io::stdout().write_all(&raw).expect("write");
+            }
+        }
+        "process" | "stream" if args.len() == 1 || args.len() == 2 => {
             let raw = fs::read(&args[0]).expect("read");
             let t0 = std::time::Instant::now();
             let got = if cmd == "process" {
@@ -255,13 +413,17 @@ fn main() {
                 }
             }
         }
-        "lz" | "paq" if args.len() == 1 || args.len() == 2 => {
+        "lz" | "paq" | "lzm" | "zmix" | "str" | "nnc" if args.len() == 1 || args.len() == 2 => {
             let raw = fs::read(&args[0]).expect("read");
             let t0 = std::time::Instant::now();
-            let got = if cmd == "lz" {
-                splb::wrap::lz_encode(&raw).map(|b| (b, "lzw1"))
-            } else {
-                splb::wrap::paq_encode(&raw).map(|b| (b, "pcaq"))
+            let got = match cmd.as_str() {
+                "lz" => splb::wrap::lz_encode(&raw).map(|b| (b, "lzw1")),
+                "paq" => splb::wrap::paq_encode(&raw).map(|b| (b, "pcaq")),
+                "lzm" => splb::lzm::encode(&raw).map(|b| (b, "lzm1")),
+                "zmix" => splb::zmix::encode(&raw).map(|b| (b, "zmx1")),
+                "str" => splb::structx::encode(&raw).map(|b| (b, "str1")),
+                "nnc" => splb::nnc::encode(&raw).map(|b| (b, "nnc1")),
+                _ => None,
             };
             match got {
                 Some((b, kind)) => {

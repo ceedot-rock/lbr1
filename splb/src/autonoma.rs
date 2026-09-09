@@ -208,7 +208,10 @@ pub fn plan(data: &[u8], class: Class) -> Plan {
     let seamed = (oct_zero >= 1 && oct_live >= 1 && n >= 8192)
         || (swarm.bands >= 3 && oct_zero >= 1);
 
-    if entropy >= 7.65 && !matchy {
+    // Formula-shaped integers: skip BWT, prefer delta. Scout, not a gene.
+    let formula = detect::arithmetic_u32_le(data).is_some();
+
+    if entropy >= 7.65 && !matchy && !formula {
         let mut p = Plan::store_only();
         p.seamed = seamed;
         return p;
@@ -230,10 +233,11 @@ pub fn plan(data: &[u8], class: Class) -> Plan {
             let primary = teach_primary(class, bands, matchy, n);
             let throttle = tick.decision == Decision::Throttle;
             let support = tick.decision == Decision::Support;
-            let try_bwt = n >= 256
+            let try_bwt = !formula
+                && n >= 256
                 && entropy < 7.2
                 && (class == Class::Text || n <= 16 * 1024 * 1024);
-            let try_match = matchy || class == Class::Binary || class == Class::Text;
+            let try_match = matchy || class == Class::Binary || class == Class::Text || formula;
             let cmaq_cap = if throttle {
                 0
             } else if support {
@@ -242,11 +246,12 @@ pub fn plan(data: &[u8], class: Class) -> Plan {
                 64 * 1024
             };
             let try_cmaq = n >= 64 && n < cmaq_cap && entropy < 7.2;
-            let try_delta = class == Class::Binary
-                && try_match
-                && n >= 64
-                && n <= 12 * 1024 * 1024
-                && swarm.hits >= 2;
+            let try_delta = formula
+                || (class == Class::Binary
+                    && try_match
+                    && n >= 64
+                    && n <= 12 * 1024 * 1024
+                    && swarm.hits >= 2);
             let match_window = if throttle && class != Class::Binary {
                 1 << 20
             } else {
