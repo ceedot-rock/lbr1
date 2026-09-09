@@ -2,19 +2,25 @@
 //! House picker: min(LBR1, pulsar BW22).
 
 pub mod asmd;
+pub mod autonoma;
 pub mod aware;
+pub mod codex;
 pub mod detect;
 pub mod frame;
 pub mod hybrid;
 pub mod parse;
+pub mod pcc;
+pub mod pccaq;
+pub mod pccz;
 pub mod rans;
+pub mod wrap;
 pub mod rans_o1;
 pub mod range;
 pub mod rans_op;
 pub mod sensors;
 pub mod sentinel;
 
-pub const VERSION: &str = "pcc-0.3.0";
+pub const VERSION: &str = "pcc-0.11.0";
 pub const MAGIC: &[u8; 4] = frame::MAGIC;
 
 pub fn version() -> &'static str {
@@ -23,6 +29,26 @@ pub fn version() -> &'static str {
 
 pub fn encode(data: &[u8]) -> Option<Vec<u8>> {
     encode_window(data, parse::DEFAULT_WINDOW as u32)
+}
+
+pub fn blob_kind(b: &[u8]) -> &'static str {
+    if pccz::is_pccz(b) {
+        "pccz"
+    } else if frame::is_tru8(b) {
+        "tru8"
+    } else if frame::is_tr8x(b) {
+        "tr8x"
+    } else if hybrid::is_hybrid(b) {
+        "lbhm"
+    } else if b.len() >= 4 && (&b[..4] == b"BW23" || &b[..4] == b"BW22") {
+        "bw22"
+    } else if wrap::is_lz(b) {
+        "lzw1"
+    } else if wrap::is_paq(b) {
+        "pcaq"
+    } else {
+        "lbr1"
+    }
 }
 
 pub fn encode_window(data: &[u8], window: u32) -> Option<Vec<u8>> {
@@ -42,17 +68,75 @@ pub fn encode_window(data: &[u8], window: u32) -> Option<Vec<u8>> {
             best = Some(blob);
         }
     }
-    let w = detect::window_for(data, window);
-    let toks = parse::parse(data, w);
-    let blob = frame::pack(&toks, data.len(), w as u32, data);
-    if blob.len() < data.len() && decode_lbr1(&blob).ok().as_deref() == Some(data) {
+    let class = detect::classify(data);
+    let plan = autonoma::plan(data, class);
+    // Champ sits BW22 when Autonoma says so. Mozilla is MATCH-only (try_bwt
+    // false above 16 MiB binary) so the 14,796,694 lock path stays MATCH.
+    if plan.try_bwt {
+        if let Some(b) = pulsar::pulsar_encode(data) {
+            match &best {
+                None => best = Some(b),
+                Some(cur) if b.len() < cur.len() => best = Some(b),
+                _ => {}
+            }
+            if let Some(cur) = &best {
+                if autonoma::crushed(cur.len(), data.len(), plan.crush) {
+                    return best;
+                }
+            }
+        }
+    }
+    if let Some(blob) = encode_lbr1_plain(data, window) {
         match &best {
             None => best = Some(blob),
             Some(b) if blob.len() < b.len() => best = Some(blob),
             _ => {}
         }
     }
+    // 4-byte delta + inner LBR1. Skip huge files (mozilla/samba bake-off cost).
+    if data.len() >= 64 && data.len() <= 12 * 1024 * 1024 {
+        let d = frame::delta4(data);
+        if let Some(inner) = encode_lbr1_plain(&d, window) {
+            let wrapb = frame::pack_ld32(data.len() as u32, &inner);
+            if wrapb.len() < data.len() && decode_lbr1(&wrapb).ok().as_deref() == Some(data) {
+                match &best {
+                    None => best = Some(wrapb),
+                    Some(b) if wrapb.len() < b.len() => best = Some(wrapb),
+                    _ => {}
+                }
+            }
+        }
+    }
+    consider_wraps(data, &mut best);
     best
+}
+
+fn consider_wraps(data: &[u8], best: &mut Option<Vec<u8>>) {
+    if let Some(z) = wrap::lz_encode(data) {
+        match best {
+            None => *best = Some(z),
+            Some(cur) if z.len() < cur.len() => *best = Some(z),
+            _ => {}
+        }
+    }
+    if let Some(p) = wrap::paq_encode(data) {
+        match best {
+            None => *best = Some(p),
+            Some(cur) if p.len() < cur.len() => *best = Some(p),
+            _ => {}
+        }
+    }
+}
+
+fn encode_lbr1_plain(data: &[u8], window: u32) -> Option<Vec<u8>> {
+    let w = detect::window_for(data, window);
+    let toks = parse::parse(data, w);
+    let blob = frame::pack(&toks, data.len(), w as u32, data);
+    if blob.len() < data.len() && decode_lbr1(&blob).ok().as_deref() == Some(data) {
+        Some(blob)
+    } else {
+        None
+    }
 }
 
 pub fn decode_lbr1(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
@@ -61,6 +145,15 @@ pub fn decode_lbr1(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
     }
     if frame::is_tr8x(buf) {
         return frame::unpack_tr8x(buf);
+    }
+    if frame::is_ld32(buf) {
+        let (n, inner) = frame::unpack_ld32(buf)?;
+        let d = decode_lbr1(inner)?;
+        let out = frame::undelta4(&d);
+        if out.len() as u32 != n {
+            return Err("ld32 len");
+        }
+        return Ok(out);
     }
     let (out, _) = frame::unpack_bytes(buf)?;
     Ok(out)
@@ -79,11 +172,13 @@ pub fn encode_best(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
         };
         best = Some((a, tag));
     }
-    if let Some(b) = pulsar::pulsar_encode(data) {
-        match &best {
-            None => best = Some((b, "bw22")),
-            Some((a, _)) if b.len() < a.len() => best = Some((b, "bw22")),
-            _ => {}
+    if best.as_ref().map(|(_, k)| *k) != Some("bw22") {
+        if let Some(b) = pulsar::pulsar_encode(data) {
+            match &best {
+                None => best = Some((b, "bw22")),
+                Some((a, _)) if b.len() < a.len() => best = Some((b, "bw22")),
+                _ => {}
+            }
         }
     }
     // Mixed-file packer. Only kept if DECODE_OK and strictly smaller than whole-file min.
@@ -94,10 +189,78 @@ pub fn encode_best(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
             _ => {}
         }
     }
+    if let Some(z) = wrap::lz_encode(data) {
+        match &best {
+            None => best = Some((z, "lzw1")),
+            Some((a, _)) if z.len() < a.len() => best = Some((z, "lzw1")),
+            _ => {}
+        }
+    }
+    if let Some(p) = wrap::paq_encode(data) {
+        match &best {
+            None => best = Some((p, "pcaq")),
+            Some((a, _)) if p.len() < a.len() => best = Some((p, "pcaq")),
+            _ => {}
+        }
+    }
+    let still_open = match &best {
+        None => true,
+        Some((a, _)) => (a.len() as f64) / (data.len() as f64) > 0.35,
+    };
+    if still_open {
+        if let Some(g) = try_gc_own(data) {
+            match &best {
+                None => best = Some((g, "gc")),
+                Some((a, _)) if g.len() < a.len() => best = Some((g, "gc")),
+                _ => {}
+            }
+        }
+    }
     best
 }
 
+fn host_skin(buf: &[u8]) -> bool {
+    buf.len() >= 2 && buf.starts_with(&[0x1f, 0x8b])
+        || buf.len() >= 4
+            && (buf.starts_with(b"XZ1\0")
+                || buf.starts_with(b"ZLB1")
+                || buf.starts_with(b"BZ1\0")
+                || buf.starts_with(b"\xfd7zX")
+                || buf.starts_with(b"BZh"))
+}
+
+/// Combined GC own-path (Mode::Max). Host xz/zlib/bzip skins are dropped.
+pub fn encode_gc(data: &[u8]) -> Option<Vec<u8>> {
+    try_gc_own(data)
+}
+
+#[cfg(feature = "aware")]
+fn try_gc_own(data: &[u8]) -> Option<Vec<u8>> {
+    if data.is_empty() || data.len() > crate::asmd::AWARE_CAP {
+        return None;
+    }
+    let b = combined_gc::codec::encode(data, combined_gc::codec::Mode::Max).bytes;
+    if host_skin(&b) {
+        return None;
+    }
+    match decode_gene(&b) {
+        Ok(back) if back == *data && b.len() < data.len() => Some(b),
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "aware"))]
+fn try_gc_own(_data: &[u8]) -> Option<Vec<u8>> {
+    None
+}
+
 pub fn decode(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if pccz::is_pccz(buf) {
+        return Err("pcc archive: use lb unzip");
+    }
+    if pcc::is_pcc(buf) {
+        return pcc::decode(buf);
+    }
     if asmd::is_asmd(buf) {
         return asmd::decode_frame(buf);
     }
@@ -114,6 +277,15 @@ pub fn decode_gene(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
     }
     if hybrid::is_hybrid(buf) {
         return hybrid::unpack(buf);
+    }
+    if frame::is_ld32(buf) {
+        return decode_lbr1(buf);
+    }
+    if wrap::is_lz(buf) {
+        return wrap::lz_decode(buf);
+    }
+    if wrap::is_paq(buf) {
+        return wrap::paq_decode(buf);
     }
     if buf.len() >= 4 && &buf[..4] == MAGIC {
         return decode_lbr1(buf);
@@ -135,12 +307,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ld32_roundtrip() {
+        let mut s = Vec::new();
+        for i in 0u32..200 {
+            s.extend_from_slice(&(i.wrapping_mul(3)).to_le_bytes());
+        }
+        let d = frame::delta4(&s);
+        assert_ne!(d, s);
+        assert_eq!(frame::undelta4(&d), s);
+    }
+
+    #[test]
     fn zeros_tiny() {
         let s = vec![0u8; 4096];
         let e = encode(&s).expect("zeros should collapse");
         assert_eq!(e.len(), 8, "tru8 must be 8 bytes, got {}", e.len());
         assert_eq!(&e[..3], b"TR8");
         assert_eq!(decode(&e).unwrap(), s);
+    }
+
+    #[test]
+    fn champ_text_can_sit_bw22() {
+        let s = b"the cat sat on the mat. ".repeat(400);
+        let e = encode_window(&s, parse::DEFAULT_WINDOW as u32).expect("champ text");
+        assert_eq!(decode(&e).unwrap(), s.as_slice());
+        assert!(e.len() < s.len());
+        assert_eq!(blob_kind(&e), "bw22");
     }
 
     #[test]

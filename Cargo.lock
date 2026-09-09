@@ -255,6 +255,9 @@ dependencies = [
 [[package]]
 name = "pulsar"
 version = "2.5.0"
+dependencies = [
+ "divsufsort",
+]
 
 [[package]]
 name = "quote"

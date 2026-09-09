@@ -7,6 +7,12 @@ use crate::rans_o1;
 pub const MAGIC: &[u8; 4] = b"LBR1";
 pub const VER: u8 = 4;
 pub const VER_RC: u8 = 5;
+/// Range coder + match-byte literals. Own pathway, not xz.
+pub const VER_ML: u8 = 6;
+/// VER_ML + third lit bank (after-rep). Own pathway.
+pub const VER_ML3: u8 = 7;
+/// 8192 match-byte models after new-match and after-rep.
+pub const VER_ML4: u8 = 8;
 /// True 8-byte solid-run frame: TR8 + symbol + u32 len.
 pub const TRU8: &[u8; 3] = b"TR8";
 pub const TRU8_LEN: usize = 8;
@@ -31,6 +37,45 @@ pub fn unpack_tru8(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
 
 pub fn is_tru8(buf: &[u8]) -> bool {
     buf.len() == TRU8_LEN && &buf[..3] == TRU8
+}
+
+/// 4-byte delta then inner LBR1. Own wrap. For sao/ooffice-class integers.
+pub const LD32: &[u8; 4] = b"LD32";
+
+pub fn delta4(data: &[u8]) -> Vec<u8> {
+    let mut o = data.to_vec();
+    for i in 4..o.len() {
+        o[i] = data[i].wrapping_sub(data[i - 4]);
+    }
+    o
+}
+
+pub fn undelta4(delta: &[u8]) -> Vec<u8> {
+    let mut o = delta.to_vec();
+    for i in 4..o.len() {
+        o[i] = o[i].wrapping_add(o[i - 4]);
+    }
+    o
+}
+
+pub fn pack_ld32(raw_len: u32, inner: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + inner.len());
+    out.extend_from_slice(LD32);
+    out.extend_from_slice(&raw_len.to_le_bytes());
+    out.extend_from_slice(inner);
+    out
+}
+
+pub fn is_ld32(buf: &[u8]) -> bool {
+    buf.len() >= 8 && buf.starts_with(LD32)
+}
+
+pub fn unpack_ld32(buf: &[u8]) -> Result<(u32, &[u8]), &'static str> {
+    if !is_ld32(buf) {
+        return Err("ld32");
+    }
+    let n = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+    Ok((n, &buf[8..]))
 }
 
 pub const TR8X: &[u8; 4] = b"TR8X";
@@ -370,6 +415,44 @@ pub fn pack(toks: &[Tok], orig_len: usize, window: u32, raw: &[u8]) -> Vec<u8> {
     put_blob(&mut out, &rans::rans_encode(&lens));
     put_blob(&mut out, &rans::rans_encode(&dists));
     {
+        let ml = crate::range::encode_toks_mlit(toks, raw);
+        let ml4 = crate::range::encode_toks_mlit4(toks, raw);
+        let mut best: Option<(u8, Vec<u8>)> = None;
+        if let Ok(back) = crate::range::decode_toks_mlit(&ml, orig_len) {
+            if back.as_slice() == raw {
+                best = Some((VER_ML, ml));
+            }
+        }
+        if let Ok(back) = crate::range::decode_toks_mlit4(&ml4, orig_len) {
+            if back.as_slice() == raw {
+                match &best {
+                    None => best = Some((VER_ML4, ml4)),
+                    Some((_, b)) if ml4.len() < b.len() => best = Some((VER_ML4, ml4)),
+                    _ => {}
+                }
+            }
+        }
+        if let Some((ver, payload)) = best {
+            let mut alt = Vec::with_capacity(13 + 4 + payload.len());
+            alt.extend_from_slice(MAGIC);
+            alt.push(ver);
+            alt.extend_from_slice(&(orig_len as u32).to_le_bytes());
+            alt.extend_from_slice(&window.to_le_bytes());
+            put_blob(&mut alt, &payload);
+            let rc = crate::range::encode_toks(toks, raw);
+            if let Ok(back_rc) = crate::range::decode_toks(&rc, orig_len) {
+                if back_rc.as_slice() == raw && rc.len() + 8 < payload.len() {
+                    let mut old = Vec::with_capacity(13 + 4 + rc.len());
+                    old.extend_from_slice(MAGIC);
+                    old.push(VER_RC);
+                    old.extend_from_slice(&(orig_len as u32).to_le_bytes());
+                    old.extend_from_slice(&window.to_le_bytes());
+                    put_blob(&mut old, &rc);
+                    return old;
+                }
+            }
+            return alt;
+        }
         let rc = crate::range::encode_toks(toks, raw);
         if let Ok(back) = crate::range::decode_toks(&rc, orig_len) {
             if back.as_slice() == raw {
@@ -379,7 +462,6 @@ pub fn pack(toks: &[Tok], orig_len: usize, window: u32, raw: &[u8]) -> Vec<u8> {
                 alt.extend_from_slice(&(orig_len as u32).to_le_bytes());
                 alt.extend_from_slice(&window.to_le_bytes());
                 put_blob(&mut alt, &rc);
-                // VER5 measurement: ship RC whenever it inverts.
                 return alt;
             }
         }
@@ -392,12 +474,21 @@ pub fn unpack_bytes(buf: &[u8]) -> Result<(Vec<u8>, u32), &'static str> {
     if buf.len() < 13 || &buf[..4] != MAGIC {
         return Err("magic");
     }
-    if buf[4] == VER_RC {
+    if buf[4] == VER_RC || buf[4] == VER_ML || buf[4] == VER_ML3 || buf[4] == VER_ML4 {
         let orig = u32::from_le_bytes(buf[5..9].try_into().unwrap()) as usize;
         let mut pos = 13usize;
         let rc = take_blob(buf, &mut pos)?;
         let window = u32::from_le_bytes(buf[9..13].try_into().unwrap());
-        return crate::range::decode_toks(rc, orig).map(|o| (o, window));
+        let out = if buf[4] == VER_ML4 {
+            crate::range::decode_toks_mlit4(rc, orig)?
+        } else if buf[4] == VER_ML3 {
+            crate::range::decode_toks_mlit3(rc, orig)?
+        } else if buf[4] == VER_ML {
+            crate::range::decode_toks_mlit(rc, orig)?
+        } else {
+            crate::range::decode_toks(rc, orig)?
+        };
+        return Ok((out, window));
     }
     if buf[4] != VER {
         return Err("ver");

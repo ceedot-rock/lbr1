@@ -31,14 +31,23 @@ impl Enc {
     }
 
     pub fn bit(&mut self, bit: u32, p: &mut u16) {
-        let span = self.high - self.low;
-        let mid = self.low + (span >> 11) * (*p as u128);
+        self.bit_p(bit, *p);
         if bit == 0 {
-            self.high = mid;
             *p = (*p).saturating_add((2048 - *p) >> 5).min(2047);
         } else {
-            self.low = mid + 1;
             *p = (*p - (*p >> 5)).max(1);
+        }
+    }
+
+    /// Mixer-supplied p. Does not adapt p.
+    pub fn bit_p(&mut self, bit: u32, p: u16) {
+        let p = p.clamp(1, 2047);
+        let span = self.high - self.low;
+        let mid = self.low + (span >> 11) * (p as u128);
+        if bit == 0 {
+            self.high = mid;
+        } else {
+            self.low = mid + 1;
         }
         self.renormalize();
     }
@@ -115,15 +124,24 @@ impl<'a> Dec<'a> {
     }
 
     pub fn bit(&mut self, p: &mut u16) -> u32 {
+        let bit = self.bit_p(*p);
+        if bit == 0 {
+            *p = (*p).saturating_add((2048 - *p) >> 5).min(2047);
+        } else {
+            *p = (*p - (*p >> 5)).max(1);
+        }
+        bit
+    }
+
+    pub fn bit_p(&mut self, p: u16) -> u32 {
+        let p = p.clamp(1, 2047);
         let span = self.high - self.low;
-        let mid = self.low + (span >> 11) * (*p as u128);
+        let mid = self.low + (span >> 11) * (p as u128);
         let bit = if self.code <= mid {
             self.high = mid;
-            *p = (*p).saturating_add((2048 - *p) >> 5).min(2047);
             0
         } else {
             self.low = mid + 1;
-            *p = (*p - (*p >> 5)).max(1);
             1
         };
         self.renormalize();
@@ -255,6 +273,64 @@ fn get_dist(
         low |= b << i;
     }
     (1u32 << n) | (low & ((1u32 << n) - 1))
+}
+
+/// LZMA-style matched literal: each bit is priced against the match-byte
+/// until they diverge. Own range coder, not xz.
+const MLIT: usize = 768;
+
+fn put_mlit(e: &mut Enc, b: u8, match_byte: u8, probs: &mut [u16; MLIT]) {
+    let mut ctx = 1usize;
+    let mut same = true;
+    for i in (0..8).rev() {
+        let bit = ((b >> i) & 1) as u32;
+        if same {
+            let mb = ((match_byte >> i) & 1) as u32;
+            let idx = (0x100 + ((mb as usize) << 8) + ctx).min(MLIT - 1);
+            e.bit(bit, &mut probs[idx]);
+            ctx = (ctx << 1) | bit as usize;
+            if bit != mb {
+                same = false;
+            }
+        } else {
+            let idx = ctx.min(255);
+            e.bit(bit, &mut probs[idx]);
+            ctx = (ctx << 1) | bit as usize;
+        }
+    }
+}
+
+fn get_mlit(d: &mut Dec, match_byte: u8, probs: &mut [u16; MLIT]) -> u8 {
+    let mut ctx = 1usize;
+    let mut same = true;
+    let mut v = 0u8;
+    for i in (0..8).rev() {
+        let bit = if same {
+            let mb = ((match_byte >> i) & 1) as u32;
+            let idx = (0x100 + ((mb as usize) << 8) + ctx).min(MLIT - 1);
+            let bit = d.bit(&mut probs[idx]);
+            ctx = (ctx << 1) | bit as usize;
+            if bit != mb {
+                same = false;
+            }
+            bit
+        } else {
+            let idx = ctx.min(255);
+            let bit = d.bit(&mut probs[idx]);
+            ctx = (ctx << 1) | bit as usize;
+            bit
+        };
+        v |= (bit as u8) << i;
+    }
+    v
+}
+
+fn mlit_idx(prev: u8, pos: usize) -> usize {
+    (prev as usize) * POS_STATES + (pos & (POS_STATES - 1))
+}
+
+fn mlit_wide_idx(phi: usize, prev: u8, pos: usize) -> usize {
+    lit_idx(phi, prev, pos)
 }
 
 fn put_len(e: &mut Enc, extra: u32, p0: &mut u16, p1: &mut u16, p3: &mut [u16], p4: &mut [u16], p11: &mut [u16]) {
@@ -546,6 +622,30 @@ pub fn get_final_tiny_snapshot() {
 }
 
 pub fn encode_toks(toks: &[crate::parse::Tok], raw: &[u8]) -> Vec<u8> {
+    encode_toks_ex(toks, raw, false, false, false)
+}
+
+pub fn encode_toks_mlit(toks: &[crate::parse::Tok], raw: &[u8]) -> Vec<u8> {
+    encode_toks_ex(toks, raw, true, false, false)
+}
+
+/// Three lit banks (after-lit / after-match / after-rep), 8192 models each.
+pub fn encode_toks_mlit3(toks: &[crate::parse::Tok], raw: &[u8]) -> Vec<u8> {
+    encode_toks_ex(toks, raw, true, true, false)
+}
+
+/// 8192 match-byte models after new-match, 8192 after-rep. Own pathway.
+pub fn encode_toks_mlit4(toks: &[crate::parse::Tok], raw: &[u8]) -> Vec<u8> {
+    encode_toks_ex(toks, raw, true, true, true)
+}
+
+fn encode_toks_ex(
+    toks: &[crate::parse::Tok],
+    raw: &[u8],
+    matched_lits: bool,
+    rep_bank: bool,
+    wide: bool,
+) -> Vec<u8> {
     use crate::parse::{Tok, MIN_MATCH};
     let mut e = Enc::new();
     let mut p_match = [PINIT; 64];
@@ -558,6 +658,24 @@ pub fn encode_toks(toks: &[crate::parse::Tok], raw: &[u8]) -> Vec<u8> {
     let mut p_len11 = [[PINIT; 16]; 32];
     let mut lit_after_lit = vec![init256(); LIT_MODELS];
     let mut lit_after_match = vec![init256(); LIT_MODELS];
+    let mut lit_after_rep = if rep_bank && !wide {
+        vec![init256(); LIT_MODELS]
+    } else {
+        Vec::new()
+    };
+    let nmlit = if !matched_lits {
+        0
+    } else if wide {
+        LIT_MODELS
+    } else {
+        256 * POS_STATES
+    };
+    let mut mlit = vec![[PINIT; MLIT]; nmlit];
+    let mut mlit_rep = if wide {
+        vec![[PINIT; MLIT]; LIT_MODELS]
+    } else {
+        Vec::new()
+    };
     let mut dist_slot = [[PINIT; 64]; 64];
     let mut dist_bits = [PINIT; 32];
     let mut dist_align = [[PINIT; 16]; 4];
@@ -567,19 +685,41 @@ pub fn encode_toks(toks: &[crate::parse::Tok], raw: &[u8]) -> Vec<u8> {
     let mut prev = 0u8;
     let mut prev_len = 0u32;
     let mut prev_match = false;
+    let mut prev_rep = false;
     for t in toks {
         match *t {
             Tok::Lit(b) => {
                 e.bit(0, &mut p_match[match_ctx(phi, prev, pos, prev_match)]);
-                let li = lit_idx(phi, prev, pos);
-                if prev_match {
-                    e.byte(b, &mut lit_after_match[li]);
+                let have_mb = prev_match
+                    && reps[0] > 0
+                    && (reps[0] as usize) <= pos
+                    && pos <= raw.len();
+                if matched_lits && have_mb && (wide || !prev_rep) {
+                    let mb = raw[pos - reps[0] as usize];
+                    let slot = if wide {
+                        mlit_wide_idx(phi, prev, pos)
+                    } else {
+                        mlit_idx(prev, pos)
+                    };
+                    if wide && prev_rep {
+                        put_mlit(&mut e, b, mb, &mut mlit_rep[slot]);
+                    } else {
+                        put_mlit(&mut e, b, mb, &mut mlit[slot]);
+                    }
                 } else {
-                    e.byte(b, &mut lit_after_lit[li]);
+                    let li = lit_idx(phi, prev, pos);
+                    if prev_match && prev_rep && rep_bank && !wide {
+                        e.byte(b, &mut lit_after_rep[li]);
+                    } else if prev_match {
+                        e.byte(b, &mut lit_after_match[li]);
+                    } else {
+                        e.byte(b, &mut lit_after_lit[li]);
+                    }
                 }
                 prev = b;
                 pos += 1;
                 prev_match = false;
+                prev_rep = false;
                 phi = phi_step(phi, false, false, 0, 0);
             }
             Tok::Match { dist, len } => {
@@ -628,6 +768,7 @@ pub fn encode_toks(toks: &[crate::parse::Tok], raw: &[u8]) -> Vec<u8> {
                 }
                 prev_len = len;
                 prev_match = true;
+                prev_rep = which < 4;
                 phi = phi_step(phi, true, which < 4, d, len);
             }
         }
@@ -636,6 +777,28 @@ pub fn encode_toks(toks: &[crate::parse::Tok], raw: &[u8]) -> Vec<u8> {
 }
 
 pub fn decode_toks(buf: &[u8], orig: usize) -> Result<Vec<u8>, &'static str> {
+    decode_toks_ex(buf, orig, false, false, false)
+}
+
+pub fn decode_toks_mlit(buf: &[u8], orig: usize) -> Result<Vec<u8>, &'static str> {
+    decode_toks_ex(buf, orig, true, false, false)
+}
+
+pub fn decode_toks_mlit3(buf: &[u8], orig: usize) -> Result<Vec<u8>, &'static str> {
+    decode_toks_ex(buf, orig, true, true, false)
+}
+
+pub fn decode_toks_mlit4(buf: &[u8], orig: usize) -> Result<Vec<u8>, &'static str> {
+    decode_toks_ex(buf, orig, true, true, true)
+}
+
+fn decode_toks_ex(
+    buf: &[u8],
+    orig: usize,
+    matched_lits: bool,
+    rep_bank: bool,
+    wide: bool,
+) -> Result<Vec<u8>, &'static str> {
     use crate::parse::MIN_MATCH;
     let mut d = Dec::open(buf)?;
     let mut p_match = [PINIT; 64];
@@ -648,6 +811,24 @@ pub fn decode_toks(buf: &[u8], orig: usize) -> Result<Vec<u8>, &'static str> {
     let mut p_len11 = [[PINIT; 16]; 32];
     let mut lit_after_lit = vec![init256(); LIT_MODELS];
     let mut lit_after_match = vec![init256(); LIT_MODELS];
+    let mut lit_after_rep = if rep_bank && !wide {
+        vec![init256(); LIT_MODELS]
+    } else {
+        Vec::new()
+    };
+    let nmlit = if !matched_lits {
+        0
+    } else if wide {
+        LIT_MODELS
+    } else {
+        256 * POS_STATES
+    };
+    let mut mlit = vec![[PINIT; MLIT]; nmlit];
+    let mut mlit_rep = if wide {
+        vec![[PINIT; MLIT]; LIT_MODELS]
+    } else {
+        Vec::new()
+    };
     let mut dist_slot = [[PINIT; 64]; 64];
     let mut dist_bits = [PINIT; 32];
     let mut dist_align = [[PINIT; 16]; 4];
@@ -657,18 +838,38 @@ pub fn decode_toks(buf: &[u8], orig: usize) -> Result<Vec<u8>, &'static str> {
     let mut prev = 0u8;
     let mut prev_len = 0u32;
     let mut prev_match = false;
+    let mut prev_rep = false;
     while out.len() < orig {
         let m = d.bit(&mut p_match[match_ctx(phi, prev, out.len(), prev_match)]);
         if m == 0 {
-            let li = lit_idx(phi, prev, out.len());
-            let b = if prev_match {
-                d.byte(&mut lit_after_match[li])
+            let pos = out.len();
+            let have_mb = prev_match && reps[0] > 0 && (reps[0] as usize) <= pos;
+            let b = if matched_lits && have_mb && (wide || !prev_rep) {
+                let mb = out[pos - reps[0] as usize];
+                let slot = if wide {
+                    mlit_wide_idx(phi, prev, pos)
+                } else {
+                    mlit_idx(prev, pos)
+                };
+                if wide && prev_rep {
+                    get_mlit(&mut d, mb, &mut mlit_rep[slot])
+                } else {
+                    get_mlit(&mut d, mb, &mut mlit[slot])
+                }
             } else {
-                d.byte(&mut lit_after_lit[li])
+                let li = lit_idx(phi, prev, pos);
+                if prev_match && prev_rep && rep_bank && !wide {
+                    d.byte(&mut lit_after_rep[li])
+                } else if prev_match {
+                    d.byte(&mut lit_after_match[li])
+                } else {
+                    d.byte(&mut lit_after_lit[li])
+                }
             };
             out.push(b);
             prev = b;
             prev_match = false;
+            prev_rep = false;
             phi = phi_step(phi, false, false, 0, 0);
         } else {
             let lc = len_ctx(phi, prev_len);
@@ -713,6 +914,7 @@ pub fn decode_toks(buf: &[u8], orig: usize) -> Result<Vec<u8>, &'static str> {
             prev = *out.last().unwrap();
             prev_len = nlen as u32;
             prev_match = true;
+            prev_rep = is_rep;
             phi = phi_step(phi, true, is_rep, dist, nlen as u32);
         }
     }
@@ -752,6 +954,15 @@ mod tests {
         let blob = encode_toks(&t, &s);
         let back = decode_toks(&blob, s.len()).expect("rc4");
         assert_eq!(back, s);
+        let blob2 = encode_toks_mlit(&t, &s);
+        let back2 = decode_toks_mlit(&blob2, s.len()).expect("mlit");
+        assert_eq!(back2, s);
+        let blob3 = encode_toks_mlit3(&t, &s);
+        let back3 = decode_toks_mlit3(&blob3, s.len()).expect("mlit3");
+        assert_eq!(back3, s);
+        let blob4 = encode_toks_mlit4(&t, &s);
+        let back4 = decode_toks_mlit4(&blob4, s.len()).expect("mlit4");
+        assert_eq!(back4, s);
     }
 
     #[test]

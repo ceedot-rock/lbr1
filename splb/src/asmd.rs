@@ -1,4 +1,4 @@
-//! Altered State Morphic Distopic Encoding. UNLICENSED. Not published.
+//! Altered State Morphic Distopic Encoding. Dual AGPL-3.0-or-later OR Commercial.
 
 use crate::detect;
 use crate::frame;
@@ -296,8 +296,30 @@ fn aware_cap() -> usize {
         .unwrap_or(AWARE_CAP)
 }
 
+fn foreign_wrap(buf: &[u8]) -> bool {
+    buf.len() >= 2 && buf.starts_with(&[0x1f, 0x8b])
+        || buf.len() >= 4
+            && (buf.starts_with(b"XZ1\0")
+                || buf.starts_with(b"ZLB1")
+                || buf.starts_with(b"BZ1\0")
+                || buf.starts_with(b"\xfd7zX")
+                || buf.starts_with(b"BZh"))
+}
+
+fn inner_magic<'a>(buf: &'a [u8]) -> &'a [u8] {
+    if is_asmd(buf) && buf.len() >= HDR {
+        if buf[4] == VERSION {
+            return &buf[HDR..];
+        }
+    }
+    buf
+}
+
 fn ok_gene(raw: &[u8], blob: &[u8]) -> bool {
     if blob.is_empty() {
+        return false;
+    }
+    if foreign_wrap(blob) || foreign_wrap(inner_magic(blob)) {
         return false;
     }
     if blob.len() >= raw.len() && !(frame::is_tru8(blob) && blob.len() == 8) {
@@ -333,7 +355,11 @@ fn try_aware(data: &[u8]) -> Option<Vec<u8>> {
     if kinetic() || skip_aware(data) {
         return None;
     }
-    Some(combined_gc::codec::encode(data, combined_gc::codec::Mode::Max).bytes)
+    let b = combined_gc::codec::encode(data, combined_gc::codec::Mode::Max).bytes;
+    if foreign_wrap(&b) {
+        return None;
+    }
+    Some(b)
 }
 
 #[cfg(not(feature = "aware"))]
@@ -372,7 +398,7 @@ fn seats_for(m: Morph, n: usize) -> &'static [Seat] {
         Morph::Text => &[Seat::Aware, Seat::Bw22, Seat::Lbr1],
         Morph::Structured => &[Seat::Aware, Seat::Tru8, Seat::Lbr1],
         Morph::Floats => &[Seat::Bw22, Seat::Lbr1, Seat::Aware],
-        Morph::Binary => &[Seat::Lbr1, Seat::Aware],
+        Morph::Binary => &[Seat::Lbr1, Seat::Bw22, Seat::Aware],
         Morph::Random => &[Seat::Lbr1],
         Morph::Mixed => &[Seat::Lbhm, Seat::Lbr1, Seat::Bw22, Seat::Aware],
     }
@@ -576,25 +602,23 @@ fn finish_unit(off: usize, data: &[u8], u: Unit) -> Unit {
 }
 
 fn encode_uniform(data: &[u8], m: Morph) -> Option<Pick> {
-    if m == Morph::Text && !kinetic() {
+    if !kinetic() && data.len() > aware_cap() {
         let cap = aware_cap();
-        if data.len() > cap {
-            let mut units = Vec::new();
-            let mut off = 0usize;
-            for chunk in data.chunks(cap) {
-                units.push(finish_unit(off, chunk, pick_unit(chunk)));
-                off += chunk.len();
-            }
-            let packed = pack_hybrid(data.len() as u32, &units);
-            if decode_pick(&packed).ok().as_deref() != Some(data) {
-                return None;
-            }
-            return Some(Pick {
-                blob: packed,
-                morph: Morph::Text,
-                seat: Seat::Lbhm,
-            });
+        let mut units = Vec::new();
+        let mut off = 0usize;
+        for chunk in data.chunks(cap) {
+            units.push(finish_unit(off, chunk, pick_unit(chunk)));
+            off += chunk.len();
         }
+        let packed = pack_hybrid(data.len() as u32, &units);
+        if decode_pick(&packed).ok().as_deref() != Some(data) {
+            return None;
+        }
+        return Some(Pick {
+            blob: packed,
+            morph: m,
+            seat: Seat::Lbhm,
+        });
     }
     let u = finish_unit(0, data, pick_unit(data));
     let blob = u.inner.clone();

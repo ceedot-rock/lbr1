@@ -1,12 +1,39 @@
 //! Hash-4 chain + bit-priced parse.
 //! Left brain: long-distance copies.
 
+#[path = "parse_rep4.rs"]
+mod parse_rep4;
+
 pub const MIN_MATCH: usize = 4;
 pub const MAX_MATCH: usize = 65535;
 pub const HASH_BITS: usize = 17;
 pub const HASH_SIZE: usize = 1 << HASH_BITS;
 pub const MAX_CHAIN: usize = 128;
 pub const DEFAULT_WINDOW: usize = 1 << 22;
+
+fn env_usize(name: &str, default: usize, lo: usize, hi: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n >= lo && n <= hi)
+        .unwrap_or(default)
+}
+
+/// mozilla parse_block_dp chain. Default 96. Override with LBR1_CHAIN=16|32|64|128.
+fn block_chain_cap(zero: bool) -> usize {
+    static CHAIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let n = *CHAIN.get_or_init(|| env_usize("LBR1_CHAIN", 96, 1, 256));
+    if zero {
+        n.min(8).max(1)
+    } else {
+        n
+    }
+}
+
+fn block_hash_bits() -> u32 {
+    static B: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *B.get_or_init(|| env_usize("LBR1_HASH", 20, 16, 22) as u32)
+}
 pub const SCOUT_STRIDE: usize = 256;
 pub const SCOUT_BITS: usize = 16;
 pub const SCOUT_SIZE: usize = 1 << SCOUT_BITS;
@@ -203,16 +230,21 @@ fn parse_priced(_data: &[u8], _window: usize) -> Vec<Tok> {
 }
 
 pub fn parse(data: &[u8], window: usize) -> Vec<Tok> {
+    parse_class(data, window, crate::detect::classify(data))
+}
+
+pub fn parse_class(data: &[u8], window: usize, class: crate::detect::Class) -> Vec<Tok> {
     let n = data.len();
     if n == 0 { return Vec::new(); }
     // Full DP tables are O(n) and OOM on mozilla in 2 GB. Stream instead.
+    // Large binaries: BT4 + 4-rep DP (own pathway, 4 MiB window).
     if n > 3 * 1024 * 1024 {
-        return parse_block_dp(data, window);
+        return parse_rep4::parse_rep4(data, window);
     }
     let mut head = vec![-1i32; HASH_SIZE];
     let mut prev = vec![-1i32; n];
-    let stride = crate::detect::scout_stride(data).max(1);
-    let use_scouts = crate::detect::scouts_wanted(data);
+    let stride = crate::detect::scout_stride_class(class).max(1);
+    let use_scouts = crate::detect::scouts_wanted_class(class);
     let nscout = n / stride + 1;
     let mut scout_head = vec![-1i32; SCOUT_SIZE];
     let mut scout_prev = vec![-1i32; nscout];
@@ -289,13 +321,15 @@ const BLOCK: usize = 256 * 1024;
 pub fn parse_block_dp(data: &[u8], window: usize) -> Vec<Tok> {
     let n = data.len();
     let win = window.max(256).min(n);
-    const HS: usize = 1 << 20;
-    let mut head = vec![-1i32; HS];
+    let bits = block_hash_bits();
+    let hs = 1usize << bits;
+    let shift = 32 - bits;
+    let mut head = vec![-1i32; hs];
     let mut prevc = vec![-1i32; n];
     let h20 = |p: usize| -> usize {
         if p + 4 > n { return 0; }
         let v = u32::from_le_bytes(data[p..p + 4].try_into().unwrap());
-        (v.wrapping_mul(0x85EB_CA6B) >> 12) as usize
+        ((v.wrapping_mul(0x85EB_CA6B) >> shift) as usize) & (hs - 1)
     };
     let use_scouts = crate::detect::scouts_wanted(data);
     let stride = crate::detect::scout_stride(data).max(1);
@@ -316,7 +350,7 @@ pub fn parse_block_dp(data: &[u8], window: usize) -> Vec<Tok> {
                 let floor = if i > win { (i - win) as i32 } else { -1 };
                 let h = h20(i);
                 let zero = data[i] | data[i + 1] | data[i + 2] | data[i + 3] == 0;
-                let cap = if zero { 8 } else { 96 };
+                let cap = block_chain_cap(zero);
                 let mut p = head[h];
                 let mut steps = 0;
                 while p > floor && steps < cap {

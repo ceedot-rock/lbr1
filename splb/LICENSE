@@ -1,11 +1,11 @@
-LBR1 / PCC / splb is available under two licenses. You choose one.
+splb (PCC CLI) is available under two licenses. You choose one.
 
 1. GNU Affero General Public License v3.0 or later
    See LICENSE.AGPL-3.0
 
 2. Slid Phi Labs Commercial License
    See LICENSE.COMMERCIAL
-   Use this to ship LBR1, PCC, splb, LZ wrap, and PAQ wrap in a closed product without AGPL source-offer.
+   Use this to ship the lb CLI and house encoder in a closed product without AGPL source-offer.
 
 Host xz/gzip/bzip2 skins stay retired. Signing keys and production
 AUTH_DIR data stay operator-only.
