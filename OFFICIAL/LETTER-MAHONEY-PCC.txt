@@ -1,0 +1,55 @@
+To: mattmahoneyfl@gmail.com
+Subject: Silesia OSCB — PCC pcc-0.12.1 (51,498,645)
+
+SENT 2026-09-09 from ceedotrock@gmail.com
+Gmail message_id: 1a0874a40a4134cb
+Thread: 1a0874a40a4134cb
+
+Hello Matt,
+
+New open-source compressor from the same lab as pulsar 2.5.0 (already on the table at 55,745,438). This is a different program.
+
+Program name on the table: PCC
+Version: pcc-0.12.1
+Source: https://github.com/ceedot-rock/lbr1/tree/pcc-0.12.1
+License: AGPL-3.0-or-later (dual commercial grant exists; OSCB does not care)
+Author: Corey Tasz / Slid Phi Labs
+
+Build and run (Linux):
+
+  git clone https://github.com/ceedot-rock/lbr1
+  cd lbr1
+  git checkout pcc-0.12.1
+  cargo build --release -p splb --bin lb
+  ./target/release/lb pcc FILE OUT
+  ./target/release/lb decode OUT RESTORED
+
+Silesia, 12 files compressed individually. Live run 2026-09-09,
+Linux x86_64, Intel Pentium Silver N6000 @ 1.10 GHz, 4 threads, 6.4 GB RAM.
+DECODE_OK 12/12. md5-matched to your table.
+
+Raw 211,938,580 → 51,498,645 (0.2430).
+
+Mahoney line (KB truncated):
+
+51498645 2738 15970 2537 1582 2670 2761 1217 4156 4992 8169 4260 443  PCC pcc-0.12.1
+
+Per file (bytes): dickens 2738073, mozilla 15970087, mr 2537416,
+nci 1582235, ooffice 2670536, osdb 2761563, reymont 1217202,
+samba 4156202, sao 4992917, webster 8169156, x-ray 4260093, xml 443165.
+
+Encode wall ~1334 s for all 12 (mozilla 852 s). Decode wall ~67 s.
+
+Same-host gzip -9: 67,631,990 (beats 12/12).
+Published bzip2-9: 54,506,769 (beats).
+Published xz-6: ~49.4M (lose).
+
+Not a rank claim against paq8px, cmix, or zpaq.
+pulsar 2.5.0 stays listed separately. Combined GC / AWARE are not this source tag.
+
+Board: https://www.slidphilabs.com/silesia
+
+Thank you,
+Corey Tasz
+ceedot-rock
+ceedotrock@gmail.com
