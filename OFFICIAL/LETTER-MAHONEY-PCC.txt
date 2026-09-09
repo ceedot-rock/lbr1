@@ -4,6 +4,8 @@ Subject: Silesia OSCB — PCC pcc-0.12.1 (51,498,645)
 SENT 2026-09-09 from ceedotrock@gmail.com
 Gmail message_id: 1a0874a40a4134cb
 Thread: 1a0874a40a4134cb
+FOLLOW-UP 2026-09-09 name: PCC (Ptaszenski Computational Codec)
+Gmail message_id: 1a0874eb5a735305
 
 Hello Matt,
 
