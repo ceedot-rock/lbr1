@@ -1,4 +1,4 @@
-# AWARE pack v1 — poly_d1 CI basement.
+# AWARE pack v1 — poly/affine CI basement (≤21 B).
 # Hard gate: bit-exact roundtrip + aware_bytes ≤ 21 on int_ramp_256k.
 #
 # Path deps: pulsar submodule (speed-cmp/pulsar-best) is required to compile
@@ -20,7 +20,7 @@ jobs:
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
-      - name: poly pack v1 tests (≤21 B + roundtrip)
+      - name: poly+affine pack tests (≤21 B + roundtrip)
         run: cargo test -p splb --lib poly -- --nocapture
       - name: aware XZ1-retired
         run: cargo test -p splb --lib aware -- --nocapture
