@@ -26,6 +26,7 @@ fn usage() -> ! {
     eprintln!("  lb zmix  FILE [OUT]         # own zpaq-style mixer");
     eprintln!("  lb str   FILE [OUT]         # own structure transform");
     eprintln!("  lb nnc   FILE [OUT]         # own online neural predictor");
+    eprintln!("  lb fastcm FILE [OUT]        # FastCM residual mixer (empty→skip)");
     eprintln!("  lb gc    FILE [OUT]         # Combined GC own-path (Max, own skins)");
     eprintln!("  lb asmd [--max] [--seat bw22|lbr1|hybrid] FILE [OUT]");
     eprintln!("  lb zip   OUT.pcc PATH [PATH...]   # our zip: many files, one .pcc");
@@ -492,7 +493,36 @@ fn main() {
                 }
             }
         }
-        "zip" | "pack" if args.len() >= 2 => {
+        "fastcm" if args.len() == 1 || args.len() == 2 => {
+            let raw = fs::read(&args[0]).expect("read");
+            if raw.is_empty() {
+                eprintln!("fastcm: empty residual → skip CM (law)");
+                process::exit(1);
+            }
+            let t0 = std::time::Instant::now();
+            match splb::fastcm::encode_residual(&raw) {
+                Some(b) => {
+                    let back = splb::fastcm::decode_residual(&b).expect("decode");
+                    assert_eq!(back, raw, "DECODE_OK failed");
+                    if args.len() == 2 {
+                        fs::write(&args[1], &b).expect("write");
+                    }
+                    println!(
+                        "{}	raw={}	coded={}	ratio={:.4}	kind=fastcm	enc_ms={}	DECODE_OK",
+                        args[0],
+                        raw.len(),
+                        b.len(),
+                        b.len() as f64 / raw.len() as f64,
+                        t0.elapsed().as_millis()
+                    );
+                }
+                None => {
+                    eprintln!("fastcm: refuse empty / no shrink");
+                    process::exit(1);
+                }
+            }
+        }
+                "zip" | "pack" if args.len() >= 2 => {
             let out_path = PathBuf::from(&args[0]);
             let mut members = Vec::new();
             for a in &args[1..] {

@@ -10,6 +10,7 @@ pub mod house;
 pub mod codex;
 pub mod crc;
 pub mod detect;
+pub mod fastcm;
 pub mod frame;
 pub mod guess;
 pub mod hybrid;
@@ -75,6 +76,10 @@ pub fn blob_kind(b: &[u8]) -> &'static str {
         "str1"
     } else if guess::is_guess(b) {
         "gss1"
+    } else if b.len() >= 5 && b.starts_with(frame::MAGIC) && b[4] == frame::VER_FCM {
+        "fastcm"
+    } else if b.len() >= 4 && b.starts_with(fastcm::MAGIC) {
+        "fastcm"
     } else {
         "lbr1"
     }
