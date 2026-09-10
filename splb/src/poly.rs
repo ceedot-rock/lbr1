@@ -1,4 +1,4 @@
-//! AWARE pack peel — polyfit, `affine_i32`, walks (`walk_d1` / `walk_lcg`).
+//! AWARE pack peel — polyfit, `affine_i32`, walks, byte `repeat`.
 //!
 //! Inner wire (LBHX carries raw_len outside):
 //! ```text
@@ -13,9 +13,12 @@
 //!   | [zlib-9(bitpacked signs) if flag==0]   // |Δ|=mag always
 //! walk_lcg (model_id 6):
 //!   model_id:u8=6 | step:i32 | seed:u32     // start fixed 0; decoder shares makeWalk
+//! repeat (model_id 7):
+//!   model_id:u8=7 | unit_len:u32 | unit_bytes | n:u32
+//!   // decoder: repeat(unit)[:n]  (Theory: n mandatory; rem wrap)
 //! ```
-//! model_id: 0=const, 1=poly_d1, 2=poly_d2, 3=affine_i32, 4=poly_d3, 5=walk_d1, 6=walk_lcg.
-//! Headers: poly_d1=19; affine=18; walk_d1≈14+zlib(signs); walk_lcg=9. CI ramps ≤21; walks ≤48/50.
+//! model_id: 0=const, 1=poly_d1, 2=poly_d2, 3=affine_i32, 4=poly_d3, 5=walk_d1, 6=walk_lcg, 7=repeat.
+//! Headers: poly_d1=19; affine=18; walk_lcg=9; repeat=9+period (text_repeat_256k→33; json_128k→61).
 
 use crate::house;
 
@@ -26,6 +29,7 @@ pub const MODEL_AFFINE_I32: u8 = 3; // exact i64 start+step (MDL tighten)
 pub const MODEL_POLY_D3: u8 = 4;
 pub const MODEL_WALK_D1: u8 = 5;
 pub const MODEL_WALK_LCG: u8 = 6;
+pub const MODEL_REPEAT: u8 = 7; // byte periodic: {model_id, unit, n}
 
 /// Pack v1 header size for deg-1 zero-residual (float64 coeffs).
 pub const POLY_D1_ZERO_HEADER: usize = 19;
@@ -38,6 +42,8 @@ pub const WALK_LCG_HEADER: usize = 9; // 1+4+4
 /// CI basement gates for locked walk fixtures (zlib-signs ladder rung).
 pub const WALK_S1_BASEMENT: usize = 48;
 pub const WALK_S5_BASEMENT: usize = 50;
+/// Max unit length searched for MODEL_REPEAT (MDL / CI).
+pub const REPEAT_MAX_UNIT: usize = 4096;
 
 fn model_id_for_deg(deg: u8) -> u8 {
     match deg {
@@ -58,6 +64,7 @@ pub fn model_tag(model_id: u8) -> &'static str {
         MODEL_POLY_D3 => "poly_d3",
         MODEL_WALK_D1 => "walk_d1",
         MODEL_WALK_LCG => "walk_lcg",
+        MODEL_REPEAT => "repeat",
         _ => "poly",
     }
 }
@@ -416,6 +423,51 @@ pub fn pack_walk_lcg(step: i32, seed: u32) -> Vec<u8> {
     out
 }
 
+/// Expand `repeat(unit)[:n]` (Theory wire).
+pub fn expand_repeat(unit: &[u8], n: usize) -> Vec<u8> {
+    if unit.is_empty() || n == 0 {
+        return vec![0u8; n];
+    }
+    let mut out = Vec::with_capacity(n);
+    while out.len() + unit.len() <= n {
+        out.extend_from_slice(unit);
+    }
+    let rem = n - out.len();
+    if rem > 0 {
+        out.extend_from_slice(&unit[..rem]);
+    }
+    out
+}
+
+/// Smallest period `p` such that `data[i] == data[i % p]` for all i.
+/// Returns `None` if no unit shorter than half the payload (within REPEAT_MAX_UNIT).
+pub fn fit_byte_repeat(data: &[u8]) -> Option<&[u8]> {
+    let n = data.len();
+    if n < 2 {
+        return None;
+    }
+    let max_p = (n / 2).min(REPEAT_MAX_UNIT);
+    'p_loop: for p in 1..=max_p {
+        // Fast reject: unit must equal the prefix and tile.
+        for i in p..n {
+            if data[i] != data[i % p] {
+                continue 'p_loop;
+            }
+        }
+        return Some(&data[..p]);
+    }
+    None
+}
+
+pub fn pack_repeat(unit: &[u8], n: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(9 + unit.len());
+    out.push(MODEL_REPEAT);
+    out.extend_from_slice(&(unit.len() as u32).to_le_bytes());
+    out.extend_from_slice(unit);
+    out.extend_from_slice(&n.to_le_bytes());
+    out
+}
+
 /// MDL pick among walk_lcg, walk_d1, affine_i32, poly deg 0..=3.
 /// For walks/affine, `deg` is reported as 1.
 pub fn mdl_pack(vals: &[i32]) -> Option<(Vec<u8>, u8, u8)> {
@@ -575,14 +627,7 @@ pub fn unpack_inner(inner: &[u8], n_vals: usize) -> Result<Vec<i32>, &'static st
     Ok(out)
 }
 
-/// Encode as LBHX KIND_POLY. Wins only if roundtrip-ok and strictly smaller.
-pub fn encode(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
-    let vals = parse_i32le(data)?;
-    if vals.len() < 2 {
-        return None;
-    }
-    let (inner, model_id, _deg) = mdl_pack(&vals)?;
-    let tag = model_tag(model_id);
+fn try_wrap(data: &[u8], inner: Vec<u8>, tag: &'static str) -> Option<(Vec<u8>, &'static str)> {
     let blob = house::wrap(house::KIND_POLY, data.len() as u32, &inner);
     if blob.len() >= data.len() {
         return None;
@@ -593,10 +638,66 @@ pub fn encode(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
     }
 }
 
+/// Encode as LBHX KIND_POLY. Wins only if roundtrip-ok and strictly smaller.
+/// Byte `repeat` (model_id=7) is tried first; then i32 walk/affine/poly MDL.
+pub fn encode(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
+    let mut best: Option<(Vec<u8>, &'static str)> = None;
+    let consider = |best: &mut Option<(Vec<u8>, &'static str)>, cand: Option<(Vec<u8>, &'static str)>| {
+        let Some((blob, tag)) = cand else { return };
+        let take = match best {
+            None => true,
+            Some((b, _)) => blob.len() < b.len(),
+        };
+        if take {
+            *best = Some((blob, tag));
+        }
+    };
+
+    if let Some(unit) = fit_byte_repeat(data) {
+        let inner = pack_repeat(unit, data.len() as u32);
+        consider(&mut best, try_wrap(data, inner, "repeat"));
+    }
+
+    if let Some(vals) = parse_i32le(data) {
+        if vals.len() >= 2 {
+            if let Some((inner, model_id, _deg)) = mdl_pack(&vals) {
+                consider(&mut best, try_wrap(data, inner, model_tag(model_id)));
+            }
+        }
+    }
+    best
+}
+
 pub fn decode(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
     let (kind, raw_len, inner) = house::unwrap(buf)?;
     if kind != house::KIND_POLY {
         return Err("not poly");
+    }
+    if inner.is_empty() {
+        return Err("poly short");
+    }
+    if inner[0] == MODEL_REPEAT {
+        if inner.len() < 9 {
+            return Err("repeat hdr");
+        }
+        let unit_len = u32::from_le_bytes(inner[1..5].try_into().unwrap()) as usize;
+        if unit_len == 0 || unit_len > REPEAT_MAX_UNIT {
+            return Err("repeat unit_len");
+        }
+        let need = 5 + unit_len + 4;
+        if inner.len() != need {
+            return Err("repeat len");
+        }
+        let unit = &inner[5..5 + unit_len];
+        let n = u32::from_le_bytes(inner[5 + unit_len..5 + unit_len + 4].try_into().unwrap());
+        if n != raw_len {
+            return Err("repeat n");
+        }
+        let out = expand_repeat(unit, n as usize);
+        if out.len() as u32 != raw_len {
+            return Err("repeat out");
+        }
+        return Ok(out);
     }
     if raw_len % 4 != 0 {
         return Err("poly raw_len");
@@ -643,7 +744,8 @@ mod tests {
     fn zeros_i32_const() {
         let raw = vec![0u8; 1024]; // 256 i32 zeros
         let (blob, tag) = encode(&raw).expect("zeros");
-        assert!(tag == "poly_d0" || tag == "poly_d1");
+        // All-zero bytes are also a trivial period-1  (MDL-smaller than poly_d0).
+        assert!(tag == "poly_d0" || tag == "poly_d1" || tag == "repeat", "tag={tag}");
         let ab = aware_bytes(&blob).unwrap();
         assert!(ab <= 21, "zeros aware_bytes={ab}");
         assert_eq!(decode(&blob).unwrap(), raw);
@@ -718,6 +820,47 @@ mod tests {
         let ab = aware_bytes(&blob).unwrap();
         assert_eq!(ab, WALK_LCG_HEADER);
         assert!(ab <= WALK_S5_BASEMENT);
+        assert_eq!(decode(&blob).unwrap(), raw);
+    }
+
+    fn fixture_text_repeat_256k() -> Vec<u8> {
+        // Locked Lab Science unit from hosted_bench.mjs textRepeat.
+        expand_repeat(b"the cat sat on the mat. ", 256 * 1024)
+    }
+
+    fn fixture_json_128k() -> Vec<u8> {
+        // Locked Lab Science unit from hosted_bench.mjs jsonLike (period 52, incl. trailing LF).
+        const UNIT: &[u8] = b"{\"id\":12345,\"name\":\"sample-record\",\"ok\":true,\"n\":0}\n";
+        expand_repeat(UNIT, 128 * 1024)
+    }
+
+    #[test]
+    fn text_repeat_256k_repeat_crown() {
+        let raw = fixture_text_repeat_256k();
+        assert_eq!(raw.len(), 262_144);
+        let unit = b"the cat sat on the mat. ";
+        assert_eq!(fit_byte_repeat(&raw), Some(&unit[..]));
+        let (blob, tag) = encode(&raw).expect("encode");
+        assert_eq!(tag, "repeat");
+        let ab = aware_bytes(&blob).expect("aware");
+        assert_eq!(ab, 9 + unit.len(), "model_id|unit_len|unit|n => 33 B");
+        assert_eq!(decode(&blob).unwrap(), raw);
+        let (best, best_tag) = crate::encode_best(&raw).expect("house");
+        assert_eq!(best_tag, "repeat");
+        assert_eq!(best, blob);
+    }
+
+    #[test]
+    fn json_128k_repeat_crown() {
+        let raw = fixture_json_128k();
+        assert_eq!(raw.len(), 131_072);
+        const UNIT: &[u8] = b"{\"id\":12345,\"name\":\"sample-record\",\"ok\":true,\"n\":0}\n";
+        assert_eq!(UNIT.len(), 52);
+        assert_eq!(fit_byte_repeat(&raw), Some(UNIT));
+        let (blob, tag) = encode(&raw).expect("encode");
+        assert_eq!(tag, "repeat");
+        let ab = aware_bytes(&blob).expect("aware");
+        assert_eq!(ab, 9 + UNIT.len(), "=> 61 B");
         assert_eq!(decode(&blob).unwrap(), raw);
     }
 
