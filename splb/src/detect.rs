@@ -164,6 +164,8 @@ pub fn window_for_class(n: usize, class: Class, asked: u32) -> usize {
     let n = n.max(256);
     match class {
         Class::Fill | Class::Sparse => 256,
+        // Large binaries (mozilla): 8 MiB L2 window (ablation −19 KiB on 20 MiB head).
+        Class::Binary if n > 16 * 1024 * 1024 => (1 << 23).min(n),
         Class::Text | Class::Binary => (asked as usize).min(1 << 22).min(n),
     }
 }

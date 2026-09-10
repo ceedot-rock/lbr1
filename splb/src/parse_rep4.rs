@@ -1,5 +1,6 @@
 //! BT4 finder + 4-rep block DP. Own pathway for large binaries.
-//! Window capped at 4 MiB. Not xz.
+//! Dual match candidates (primary + alt dist) into block DP.
+//! Window: 4 MiB default; detect may raise to 8 MiB on huge binaries. Not xz.
 
 use super::{match_len, Tok, MAX_MATCH, MIN_MATCH};
 
@@ -103,7 +104,8 @@ fn bits_new(dist: u32, len: u32) -> u32 {
 }
 
 /// Binary tree, 4-byte hash, cyclic buffer = window.
-fn bt4_fill(data: &[u8], window: usize, best_d: &mut [u32], best_l: &mut [u32]) {
+/// Keeps primary (longest) + alternate (2nd distinct dist) for DP.
+fn bt4_fill(data: &[u8], window: usize, best_d: &mut [u32], best_l: &mut [u32], alt_d: &mut [u32], alt_l: &mut [u32]) {
     let n = data.len();
     let win = window.max(256).min(n);
     let depth = bt_depth();
@@ -136,6 +138,8 @@ fn bt4_fill(data: &[u8], window: usize, best_d: &mut [u32], best_l: &mut [u32]) 
         let mut len1 = 0usize;
         let mut bd = 0u32;
         let mut bl = 0u32;
+        let mut ad = 0u32;
+        let mut al = 0u32;
         let mut steps = 0usize;
         loop {
             if cur <= floor || steps >= cap_steps {
@@ -157,12 +161,22 @@ fn bt4_fill(data: &[u8], window: usize, best_d: &mut [u32], best_l: &mut [u32]) 
                 len += 1;
             }
             if (len as u32) > bl {
+                if bd != 0 && bd != (pos - j) as u32 {
+                    ad = bd;
+                    al = bl;
+                }
                 bl = len as u32;
                 bd = (pos - j) as u32;
                 if len >= max {
                     son[ptr0] = son[pair];
                     son[ptr1] = son[pair + 1];
                     break;
+                }
+            } else if (len as u32) >= MIN_MATCH as u32 {
+                let dist = (pos - j) as u32;
+                if dist != bd && (len as u32) > al {
+                    al = len as u32;
+                    ad = dist;
                 }
             }
             if j + len >= n || data[j + len] < data[pos + len] {
@@ -179,6 +193,8 @@ fn bt4_fill(data: &[u8], window: usize, best_d: &mut [u32], best_l: &mut [u32]) 
         }
         best_d[pos] = bd;
         best_l[pos] = bl;
+        alt_d[pos] = ad;
+        alt_l[pos] = al;
     }
 }
 
@@ -240,8 +256,17 @@ pub fn parse_rep4(data: &[u8], window: usize) -> Vec<Tok> {
     let win = window.max(256).min(n);
     let mut best_d = vec![0u32; n];
     let mut best_l = vec![0u32; n];
-    bt4_fill(data, win, &mut best_d, &mut best_l);
+    let mut alt_d = vec![0u32; n];
+    let mut alt_l = vec![0u32; n];
+    bt4_fill(data, win, &mut best_d, &mut best_l, &mut alt_d, &mut alt_l);
     chain_improve(data, win, &mut best_d, &mut best_l);
+    // Preserve alts that remain competitive after chain improved primary.
+    for i in 0..n {
+        if alt_l[i] >= MIN_MATCH as u32 && alt_d[i] == best_d[i] {
+            alt_l[i] = 0;
+            alt_d[i] = 0;
+        }
+    }
 
     let mut toks = Vec::new();
     let mut file_reps = [0u32; 4];
@@ -326,12 +351,14 @@ pub fn parse_rep4(data: &[u8], window: usize) -> Vec<Tok> {
                     }
                 }
             }
-            if best_l[i] >= parse_min() {
-                let dist = best_d[i];
-                let is_rep = dist != 0 && reps.iter().any(|&r| r == dist);
-                let nc = lens_try(best_l[i].min((m - k) as u32), &mut cand);
-                for t in 0..nc {
-                    let len = cand[t];
+            for (dist, bl) in [(best_d[i], best_l[i]), (alt_d[i], alt_l[i])] {
+                if bl < parse_min() || dist == 0 {
+                    continue;
+                }
+                let is_rep = reps.iter().any(|&r| r == dist);
+                let nc = lens_try(bl.min((m - k) as u32), &mut cand);
+                for ti in 0..nc {
+                    let len = cand[ti];
                     let j = k + len as usize;
                     if j > m {
                         continue;
