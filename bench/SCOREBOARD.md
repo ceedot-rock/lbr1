@@ -15,3 +15,7 @@ corpus,file,bytes_in,bytes_out,aware_bytes,encode_ms,decode_ms,roundtrip_ok,mode
 
 ## Fixture
 See `kernel-pack-v1-scoreboard.csv` from the 2026-09-10 Lab Science pass (crown row: `ramp,int_ramp_256k,...,aware_bytes=19,...,claimable=true,WIN`).
+
+## affine_i32 (model_id=3)
+
+Next MDL tighten after pack v1: exact `start:i64`+`step:i64` wire (18 B zero-residual) beats float64 `poly_d1` (19 B) on exact ramps. CI still ≤21 B + bit-exact on `int_ramp_256k`.
