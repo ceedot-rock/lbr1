@@ -171,8 +171,8 @@ pub fn window_for_class(n: usize, class: Class, asked: u32) -> usize {
     }
     match class {
         Class::Fill | Class::Sparse => 256,
-        // Large binaries (mozilla): 16 MiB L2 window (stride2 coverage; 20MiB −6.7KiB vs 8MiB).
-        Class::Binary if n > 16 * 1024 * 1024 => (1 << 24).min(n),
+        // Large binaries (mozilla): 32 MiB L2 window (stride4 coverage; 40MiB probe −40.9KiB vs 16MiB).
+        Class::Binary if n > 16 * 1024 * 1024 => (1 << 25).min(n),
         Class::Text | Class::Binary => (asked as usize).min(1 << 22).min(n),
     }
 }
