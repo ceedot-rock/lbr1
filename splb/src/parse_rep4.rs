@@ -2,7 +2,7 @@
 //! Dual match candidates (primary + alt dist) into block DP.
 //! Stride2: longest-first lens + tie→longer coverage; 8 MiB DP blocks.
 //! Stride3: secondary hash-8 chain (HC8 depth 128) + demote→alt for longer coverage.
-//! Detect may raise match window to 16 MiB on huge binaries. Not xz.
+//! Stride4: detect may raise match window to 32 MiB on huge binaries. Not xz.
 
 use super::{match_len, Tok, MAX_MATCH, MIN_MATCH};
 
