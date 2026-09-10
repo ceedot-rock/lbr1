@@ -13,6 +13,8 @@ pub const VER_ML: u8 = 6;
 pub const VER_ML3: u8 = 7;
 /// 8192 match-byte models after new-match and after-rep.
 pub const VER_ML4: u8 = 8;
+/// LBR1 + FastCM lit residual (daily L3). Own pathway.
+pub const VER_FCM: u8 = 9;
 /// True 8-byte solid-run frame: TR8 + symbol + u32 len.
 pub const TRU8: &[u8; 3] = b"TR8";
 pub const TRU8_LEN: usize = 8;
@@ -407,6 +409,19 @@ pub fn pack(toks: &[Tok], orig_len: usize, window: u32, raw: &[u8]) -> Vec<u8> {
             kind = 2;
             blob = op;
         }
+        // Daily L3 FastCM: ONLY on non-empty residual (law). Skip mixer theater if empty.
+        // Min size floor avoids header tax on tiny lit tails; disable with LBR1_FASTCM=0.
+        let fastcm_on = std::env::var("LBR1_FASTCM")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        if fastcm_on && !crate::fastcm::should_skip(&lits) && lits.len() >= 64 {
+            if let Some(fcm) = crate::fastcm::encode_residual(&lits) {
+                if fcm.len() < blob.len() {
+                    kind = crate::fastcm::LIT_KIND;
+                    blob = fcm;
+                }
+            }
+        }
         (kind, blob)
     };
     put_blob(&mut out, &rans::rans_encode(&flags));
@@ -414,59 +429,69 @@ pub fn pack(toks: &[Tok], orig_len: usize, window: u32, raw: &[u8]) -> Vec<u8> {
     put_blob(&mut out, &lit_blob);
     put_blob(&mut out, &rans::rans_encode(&lens));
     put_blob(&mut out, &rans::rans_encode(&dists));
+
+    // Candidate set: VER4 (+ optional FastCM lits), VER_ML*, VER_RC. Pick smallest DECODE_OK.
+    let mut winner: Option<Vec<u8>> = None;
+    let take = |winner: &mut Option<Vec<u8>>, cand: Vec<u8>| {
+        match winner {
+            None => *winner = Some(cand),
+            Some(cur) if cand.len() < cur.len() => *winner = Some(cand),
+            _ => {}
+        }
+    };
+
+    // Prefer VER_FCM label when lit residual used FastCM (daily L3 seat visible).
+    if kind == crate::fastcm::LIT_KIND {
+        let mut fcm_frame = out.clone();
+        fcm_frame[4] = VER_FCM;
+        if crate::decode_lbr1(&fcm_frame).ok().as_deref() == Some(raw) {
+            take(&mut winner, fcm_frame);
+        } else if crate::decode_lbr1(&out).ok().as_deref() == Some(raw) {
+            take(&mut winner, out.clone());
+        }
+    } else if crate::decode_lbr1(&out).ok().as_deref() == Some(raw) {
+        take(&mut winner, out.clone());
+    }
+
     {
         let ml = crate::range::encode_toks_mlit(toks, raw);
         let ml4 = crate::range::encode_toks_mlit4(toks, raw);
-        let mut best: Option<(u8, Vec<u8>)> = None;
         if let Ok(back) = crate::range::decode_toks_mlit(&ml, orig_len) {
             if back.as_slice() == raw {
-                best = Some((VER_ML, ml));
+                let mut alt = Vec::with_capacity(13 + 4 + ml.len());
+                alt.extend_from_slice(MAGIC);
+                alt.push(VER_ML);
+                alt.extend_from_slice(&(orig_len as u32).to_le_bytes());
+                alt.extend_from_slice(&window.to_le_bytes());
+                put_blob(&mut alt, &ml);
+                take(&mut winner, alt);
             }
         }
         if let Ok(back) = crate::range::decode_toks_mlit4(&ml4, orig_len) {
             if back.as_slice() == raw {
-                match &best {
-                    None => best = Some((VER_ML4, ml4)),
-                    Some((_, b)) if ml4.len() < b.len() => best = Some((VER_ML4, ml4)),
-                    _ => {}
-                }
-            }
-        }
-        if let Some((ver, payload)) = best {
-            let mut alt = Vec::with_capacity(13 + 4 + payload.len());
-            alt.extend_from_slice(MAGIC);
-            alt.push(ver);
-            alt.extend_from_slice(&(orig_len as u32).to_le_bytes());
-            alt.extend_from_slice(&window.to_le_bytes());
-            put_blob(&mut alt, &payload);
-            let rc = crate::range::encode_toks(toks, raw);
-            if let Ok(back_rc) = crate::range::decode_toks(&rc, orig_len) {
-                if back_rc.as_slice() == raw && rc.len() + 8 < payload.len() {
-                    let mut old = Vec::with_capacity(13 + 4 + rc.len());
-                    old.extend_from_slice(MAGIC);
-                    old.push(VER_RC);
-                    old.extend_from_slice(&(orig_len as u32).to_le_bytes());
-                    old.extend_from_slice(&window.to_le_bytes());
-                    put_blob(&mut old, &rc);
-                    return old;
-                }
-            }
-            return alt;
-        }
-        let rc = crate::range::encode_toks(toks, raw);
-        if let Ok(back) = crate::range::decode_toks(&rc, orig_len) {
-            if back.as_slice() == raw {
-                let mut alt = Vec::with_capacity(13 + 4 + rc.len());
+                let mut alt = Vec::with_capacity(13 + 4 + ml4.len());
                 alt.extend_from_slice(MAGIC);
-                alt.push(VER_RC);
+                alt.push(VER_ML4);
                 alt.extend_from_slice(&(orig_len as u32).to_le_bytes());
                 alt.extend_from_slice(&window.to_le_bytes());
-                put_blob(&mut alt, &rc);
-                return alt;
+                put_blob(&mut alt, &ml4);
+                take(&mut winner, alt);
+            }
+        }
+        let rc = crate::range::encode_toks(toks, raw);
+        if let Ok(back_rc) = crate::range::decode_toks(&rc, orig_len) {
+            if back_rc.as_slice() == raw {
+                let mut old = Vec::with_capacity(13 + 4 + rc.len());
+                old.extend_from_slice(MAGIC);
+                old.push(VER_RC);
+                old.extend_from_slice(&(orig_len as u32).to_le_bytes());
+                old.extend_from_slice(&window.to_le_bytes());
+                put_blob(&mut old, &rc);
+                take(&mut winner, old);
             }
         }
     }
-    out
+    winner.unwrap_or(out)
 }
 
 /// Decode payload directly to bytes (o1 lits need running output for context).
@@ -490,7 +515,8 @@ pub fn unpack_bytes(buf: &[u8]) -> Result<(Vec<u8>, u32), &'static str> {
         };
         return Ok((out, window));
     }
-    if buf[4] != VER {
+    // VER (4) and VER_FCM (9) share the split-stream layout; FCM uses lit kind=3.
+    if buf[4] != VER && buf[4] != VER_FCM {
         return Err("ver");
     }
     let orig = u32::from_le_bytes(buf[5..9].try_into().unwrap()) as usize;
@@ -510,7 +536,7 @@ pub fn unpack_bytes(buf: &[u8]) -> Result<(Vec<u8>, u32), &'static str> {
             0.0,
             0.0,
         );
-        crate::sentinel::decode_breakpoint(&tick, kind <= 2)?;
+        crate::sentinel::decode_breakpoint(&tick, kind <= 3)?;
     }
     let lit_blob = take_blob(buf, &mut pos)?;
     let lens = rans::rans_decode(take_blob(buf, &mut pos)?)?;
@@ -519,6 +545,13 @@ pub fn unpack_bytes(buf: &[u8]) -> Result<(Vec<u8>, u32), &'static str> {
     let nlit = flags.iter().filter(|&&f| f == 0).count();
     let lits_o0 = if kind == 0 {
         Some(rans::rans_decode(lit_blob)?)
+    } else if kind == crate::fastcm::LIT_KIND {
+        // FastCM residual: decode whole lit stream up front (empty forbidden by encoder).
+        let decoded = crate::fastcm::decode_residual(lit_blob)?;
+        if decoded.len() != nlit {
+            return Err("fcm nlit");
+        }
+        Some(decoded)
     } else {
         None
     };
@@ -615,4 +648,50 @@ pub fn unpack_bytes(buf: &[u8]) -> Result<(Vec<u8>, u32), &'static str> {
         return Err("len");
     }
     Ok((out, window))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::{self, Tok};
+
+    #[test]
+    fn fastcm_nonempty_residual_roundtrip_via_pack() {
+        // Motif with literals remaining after matches → non-empty residual.
+        let s = b"ABCDxxxxABCDyyyyABCD".repeat(80);
+        let toks = parse::parse(&s, parse::DEFAULT_WINDOW);
+        let nlit = toks.iter().filter(|t| matches!(t, Tok::Lit(_))).count();
+        assert!(nlit > 0, "expected non-empty lit residual");
+        let blob = pack(&toks, s.len(), parse::DEFAULT_WINDOW as u32, &s);
+        let (back, _) = unpack_bytes(&blob).expect("unpack");
+        assert_eq!(back, s.as_slice());
+    }
+
+    #[test]
+    fn fastcm_empty_residual_skips_cm_law() {
+        // Pure repeat — matches only, empty lit residual → FastCM must not seat.
+        let unit = b"WXYZ";
+        let s = unit.repeat(256);
+        let toks = parse::parse(&s, parse::DEFAULT_WINDOW);
+        let lits: Vec<u8> = toks
+            .iter()
+            .filter_map(|t| match t {
+                Tok::Lit(b) => Some(*b),
+                _ => None,
+            })
+            .collect();
+        // May have a few leading lits before first match; gate is encode_residual empty.
+        if lits.is_empty() {
+            assert!(crate::fastcm::should_skip(&lits));
+            assert!(crate::fastcm::encode_residual(&lits).is_none());
+        }
+        let blob = pack(&toks, s.len(), parse::DEFAULT_WINDOW as u32, &s);
+        let (back, _) = unpack_bytes(&blob).expect("unpack");
+        assert_eq!(back, s.as_slice());
+        // Frame must not be VER_FCM when residual empty.
+        if lits.is_empty() {
+            assert_ne!(blob[4], VER_FCM, "empty residual must not seat FastCM");
+        }
+    }
 }
