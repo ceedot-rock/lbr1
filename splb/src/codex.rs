@@ -66,7 +66,7 @@ impl Codex {
 fn dark_op(buf: &[u8]) -> &'static str {
     pcc::unpack(buf)
         .ok()
-        .and_then(|(_, blocks)| blocks.first().map(|b| b.op.name()))
+        .and_then(|(_, _, blocks)| blocks.first().map(|b| b.op.name()))
         .unwrap_or("pcc")
 }
 
