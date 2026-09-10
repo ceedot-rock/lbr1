@@ -823,10 +823,20 @@ mod tests {
         assert_eq!(decode(&blob).unwrap(), raw);
     }
 
+    fn fixture_text_repeat_256k() -> Vec<u8> {
+        // Locked Lab Science unit from hosted_bench.mjs textRepeat.
+        expand_repeat(b"the cat sat on the mat. ", 256 * 1024)
+    }
+
+    fn fixture_json_128k() -> Vec<u8> {
+        // Locked Lab Science unit from hosted_bench.mjs jsonLike (period 52, incl. trailing LF).
+        const UNIT: &[u8] = b"{\"id\":12345,\"name\":\"sample-record\",\"ok\":true,\"n\":0}\n";
+        expand_repeat(UNIT, 128 * 1024)
+    }
+
     #[test]
     fn text_repeat_256k_repeat_crown() {
-        let raw = std::fs::read("/workspace/corpora/periodic/text_repeat_256k.bin")
-            .expect("fixture text_repeat_256k");
+        let raw = fixture_text_repeat_256k();
         assert_eq!(raw.len(), 262_144);
         let unit = b"the cat sat on the mat. ";
         assert_eq!(fit_byte_repeat(&raw), Some(&unit[..]));
@@ -842,14 +852,15 @@ mod tests {
 
     #[test]
     fn json_128k_repeat_crown() {
-        let raw = std::fs::read("/workspace/corpora/periodic/json_128k.bin").expect("fixture json_128k");
+        let raw = fixture_json_128k();
         assert_eq!(raw.len(), 131_072);
-        let unit = b"{\"id\":12345,\"name\":\"sample-record\",\"ok\":true,\"n\":0}\n";
-        assert_eq!(fit_byte_repeat(&raw), Some(&unit[..]));
+        const UNIT: &[u8] = b"{\"id\":12345,\"name\":\"sample-record\",\"ok\":true,\"n\":0}\n";
+        assert_eq!(UNIT.len(), 52);
+        assert_eq!(fit_byte_repeat(&raw), Some(UNIT));
         let (blob, tag) = encode(&raw).expect("encode");
         assert_eq!(tag, "repeat");
         let ab = aware_bytes(&blob).expect("aware");
-        assert_eq!(ab, 9 + unit.len(), "=> 61 B");
+        assert_eq!(ab, 9 + UNIT.len(), "=> 61 B");
         assert_eq!(decode(&blob).unwrap(), raw);
     }
 
