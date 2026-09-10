@@ -1,6 +1,7 @@
 //! BT4 finder + 4-rep block DP. Own pathway for large binaries.
 //! Dual match candidates (primary + alt dist) into block DP.
 //! Stride2: longest-first lens + tie→longer coverage; 8 MiB DP blocks.
+//! Stride3: secondary hash-8 chain (HC8 depth 128) + demote→alt for longer coverage.
 //! Detect may raise match window to 16 MiB on huge binaries. Not xz.
 
 use super::{match_len, Tok, MAX_MATCH, MIN_MATCH};
@@ -125,6 +126,80 @@ fn bits_new(dist: u32, len: u32) -> u32 {
         + slot.saturating_sub(1)
 }
 
+/// Update primary longest; demote previous primary into alt when dist differs.
+/// Also promote competitive non-best distances into alt (longer coverage for DP).
+fn consider_dual(
+    best_len: &mut u32,
+    best_dist: &mut u32,
+    alt_len: &mut u32,
+    alt_dist: &mut u32,
+    data: &[u8],
+    i: usize,
+    j: usize,
+) {
+    if j >= i {
+        return;
+    }
+    if data[j] != data[i]
+        || data[j + 1] != data[i + 1]
+        || data[j + 2] != data[i + 2]
+        || data[j + 3] != data[i + 3]
+    {
+        return;
+    }
+    let n = super::match_len(data, i, j, MAX_MATCH) as u32;
+    if n < MIN_MATCH as u32 {
+        return;
+    }
+    let dist = (i - j) as u32;
+    if n > *best_len {
+        if demote_alt() && *best_dist != 0 && *best_dist != dist {
+            // Demote prior best into alt if it stays competitive.
+            if *best_len > *alt_len || (*best_len == *alt_len && *alt_dist == 0) {
+                *alt_len = *best_len;
+                *alt_dist = *best_dist;
+            }
+        }
+        *best_len = n;
+        *best_dist = dist;
+    } else if dist != *best_dist && n > *alt_len {
+        *alt_len = n;
+        *alt_dist = dist;
+    }
+}
+
+fn demote_alt() -> bool {
+    static D: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *D.get_or_init(|| {
+        match std::env::var("LBR1_DEMOTE").ok().as_deref() {
+            Some("0") | Some("off") | Some("false") => false,
+            _ => true, // with HC8, demote preserves prior best as alt for DP
+        }
+    })
+}
+
+fn sensor_stride() -> usize {
+    static S: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *S.get_or_init(|| {
+        std::env::var("LBR1_SENSOR_STRIDE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n >= 1 && n <= 256)
+            .unwrap_or(64) // keep stride2 sensor density; denser (16) regressed with HC8
+    })
+}
+
+fn hc8_depth() -> usize {
+    static D: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *D.get_or_init(|| {
+        std::env::var("LBR1_HC8_DEPTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n <= 128)
+            .unwrap_or(128)
+    })
+}
+
 /// Binary tree, 4-byte hash, cyclic buffer = window.
 /// Keeps primary (longest) + alternate (2nd distinct dist) for DP.
 fn bt4_fill(data: &[u8], window: usize, best_d: &mut [u32], best_l: &mut [u32], alt_d: &mut [u32], alt_l: &mut [u32]) {
@@ -220,14 +295,21 @@ fn bt4_fill(data: &[u8], window: usize, best_d: &mut [u32], best_l: &mut [u32], 
     }
 }
 
-/// Hash-4 chain 128 on the same 4 MiB window. Keeps BT4's match if longer.
-fn chain_improve(data: &[u8], window: usize, best_d: &mut [u32], best_l: &mut [u32]) {
+/// Hash-4 chain 128. Updates primary and alt (demote→alt when a longer match wins).
+fn chain_improve(
+    data: &[u8],
+    window: usize,
+    best_d: &mut [u32],
+    best_l: &mut [u32],
+    alt_d: &mut [u32],
+    alt_l: &mut [u32],
+) {
     let n = data.len();
     let win = window.max(256).min(n);
     const HS: usize = 1 << 20;
     let mut head = vec![-1i32; HS];
     let mut prevc = vec![-1i32; win];
-    let mut sensors = crate::sensors::Sensors::new(n, 64);
+    let mut sensors = crate::sensors::Sensors::new(n, sensor_stride());
     let h20 = |p: usize| -> usize {
         if p + 4 > n {
             return 0;
@@ -247,26 +329,92 @@ fn chain_improve(data: &[u8], window: usize, best_d: &mut [u32], best_l: &mut [u
         let mut steps = 0usize;
         let mut bd = best_d[i];
         let mut bl = best_l[i];
+        let mut ad = alt_d[i];
+        let mut al = alt_l[i];
         while p > floor && steps < cap {
             let j = p as usize;
             if j < i {
-                super::consider(&mut bl, &mut bd, data, i, j);
+                consider_dual(&mut bl, &mut bd, &mut al, &mut ad, data, i, j);
             }
             p = prevc[j % win];
             steps += 1;
         }
         for r in sensors.reports(data, i) {
             if (r.pos as i32) > floor && r.pos < i {
-                super::consider(&mut bl, &mut bd, data, i, r.pos);
+                consider_dual(&mut bl, &mut bd, &mut al, &mut ad, data, i, r.pos);
             }
         }
         best_d[i] = bd;
         best_l[i] = bl;
+        alt_d[i] = ad;
+        alt_l[i] = al;
         if i + 3 < n {
             prevc[i % win] = head[h];
             head[h] = i as i32;
             sensors.plant(data, i);
         }
+    }
+}
+
+/// Secondary hash-8 chain: prefers longer matches (8-byte fingerprint) BT4/HC4 may miss.
+fn hc8_improve(
+    data: &[u8],
+    window: usize,
+    best_d: &mut [u32],
+    best_l: &mut [u32],
+    alt_d: &mut [u32],
+    alt_l: &mut [u32],
+) {
+    let depth = hc8_depth();
+    if depth == 0 {
+        return;
+    }
+    let n = data.len();
+    let win = window.max(256).min(n);
+    const HS: usize = 1 << 18; // 256K buckets — hash8 coverage without huge RAM
+    let mut head = vec![-1i32; HS];
+    let mut prevc = vec![-1i32; win];
+    let h8 = |p: usize| -> usize {
+        if p + 8 > n {
+            return 0;
+        }
+        let lo = u32::from_le_bytes(data[p..p + 4].try_into().unwrap());
+        let hi = u32::from_le_bytes(data[p + 4..p + 8].try_into().unwrap());
+        let v = (lo as u64) | ((hi as u64) << 32);
+        (v.wrapping_mul(0x9E37_79B1_85EB_CA77) >> (64 - 18)) as usize
+    };
+    for i in 0..n {
+        if i + 8 > n {
+            break;
+        }
+        let floor = if i > win { (i - win) as i32 } else { -1 };
+        let h = h8(i);
+        let zero = data[i] | data[i + 1] | data[i + 2] | data[i + 3] == 0;
+        let cap = if zero { 4 } else { depth };
+        let mut p = head[h];
+        let mut steps = 0usize;
+        let mut bd = best_d[i];
+        let mut bl = best_l[i];
+        let mut ad = alt_d[i];
+        let mut al = alt_l[i];
+        // Skip HC8 probe when we already have a very long primary (coverage paid).
+        let skip = bl >= 256;
+        if !skip {
+            while p > floor && steps < cap {
+                let j = p as usize;
+                if j < i {
+                    consider_dual(&mut bl, &mut bd, &mut al, &mut ad, data, i, j);
+                }
+                p = prevc[j % win];
+                steps += 1;
+            }
+            best_d[i] = bd;
+            best_l[i] = bl;
+            alt_d[i] = ad;
+            alt_l[i] = al;
+        }
+        prevc[i % win] = head[h];
+        head[h] = i as i32;
     }
 }
 
@@ -281,8 +429,9 @@ pub fn parse_rep4(data: &[u8], window: usize) -> Vec<Tok> {
     let mut alt_d = vec![0u32; n];
     let mut alt_l = vec![0u32; n];
     bt4_fill(data, win, &mut best_d, &mut best_l, &mut alt_d, &mut alt_l);
-    chain_improve(data, win, &mut best_d, &mut best_l);
-    // Preserve alts that remain competitive after chain improved primary.
+    chain_improve(data, win, &mut best_d, &mut best_l, &mut alt_d, &mut alt_l);
+    hc8_improve(data, win, &mut best_d, &mut best_l, &mut alt_d, &mut alt_l);
+    // Preserve alts that remain competitive after chain/HC8 improved primary.
     for i in 0..n {
         if alt_l[i] >= MIN_MATCH as u32 && alt_d[i] == best_d[i] {
             alt_l[i] = 0;
