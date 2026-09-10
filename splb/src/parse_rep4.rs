@@ -1,6 +1,7 @@
 //! BT4 finder + 4-rep block DP. Own pathway for large binaries.
 //! Dual match candidates (primary + alt dist) into block DP.
-//! Window: 4 MiB default; detect may raise to 8 MiB on huge binaries. Not xz.
+//! Stride2: longest-first lens + tie→longer coverage; 8 MiB DP blocks.
+//! Detect may raise match window to 16 MiB on huge binaries. Not xz.
 
 use super::{match_len, Tok, MAX_MATCH, MIN_MATCH};
 
@@ -17,9 +18,25 @@ fn bump_reps(reps: [u32; 4], d: u32) -> [u32; 4] {
     [d, reps[0], reps[1], reps[2]]
 }
 
-const BLOCK: usize = 4 * 1024 * 1024;
+const BLOCK_DEFAULT: usize = 4 * 1024 * 1024;
 const INF: u32 = u32::MAX / 4;
 const HASH_BITS: u32 = 18;
+
+fn dp_block(n: usize) -> usize {
+    if let Ok(s) = std::env::var("LBR1_DP_BLOCK") {
+        if let Ok(v) = s.parse::<usize>() {
+            if (1 << 20) <= v && v <= (16 << 20) {
+                return v;
+            }
+        }
+    }
+    // Large binaries: 8 MiB DP block — fewer artificial match truncations at seams.
+    if n > 16 * 1024 * 1024 {
+        8 * 1024 * 1024
+    } else {
+        BLOCK_DEFAULT
+    }
+}
 
 fn bt_depth() -> usize {
     static D: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -51,21 +68,26 @@ fn lens_try(best: u32, out: &mut [u32; 16]) -> usize {
         return 0;
     }
     let mut n = 0usize;
-    let mut l = minm;
-    while l <= best.min(8) && n < 15 {
-        out[n] = l;
-        n += 1;
-        l += 1;
-    }
-    for k in [12u32, 16, 24, 32, 48, 64, 128, 256, 384, 512, 768, 1024, 2048, 4096, 8192, 16384] {
-        if k < best && n < 15 {
+    // Longest first so equal-cost ties keep longer coverage (overlap-aware parse).
+    out[n] = best;
+    n += 1;
+    for k in [16384u32, 8192, 4096, 2048, 1024, 768, 512, 384, 256, 128, 64, 48, 32, 24, 16, 12] {
+        if k < best && k >= minm && n < 15 {
             out[n] = k;
             n += 1;
         }
     }
-    if n < 16 {
-        out[n] = best;
-        n += 1;
+    // Short descending: 8..minm — still first-wins under static bands prefers longer.
+    let mut l = best.min(8);
+    while l >= minm && n < 16 {
+        if n == 0 || out.iter().take(n).all(|&x| x != l) {
+            out[n] = l;
+            n += 1;
+        }
+        if l == minm {
+            break;
+        }
+        l -= 1;
     }
     n
 }
@@ -274,9 +296,10 @@ pub fn parse_rep4(data: &[u8], window: usize) -> Vec<Tok> {
     let mut file_prev_match = false;
     let mut file_prev_len = 0u32;
     let mut book = crate::range::TinyBook::new();
+    let block = dp_block(n);
     let mut pos = 0usize;
     while pos < n {
-        let end = (pos + BLOCK).min(n);
+        let end = (pos + block).min(n);
         let m = end - pos;
         let mut price = vec![INF; m + 1];
         let mut come = vec![-1i32; m + 1];
@@ -335,7 +358,9 @@ pub fn parse_rep4(data: &[u8], window: usize) -> Vec<Tok> {
                         }
                         let cr = bits_rep(len);
                         let pm = price[k].saturating_add(cr);
-                        if pm < price[j] {
+                        let better = pm < price[j]
+                            || (pm == price[j] && come[j] >= 0 && (len as i32) > come[j]);
+                        if better {
                             price[j] = pm;
                             come[j] = len as i32;
                             come_d[j] = rd;
@@ -369,7 +394,9 @@ pub fn parse_rep4(data: &[u8], window: usize) -> Vec<Tok> {
                         bits_new(dist, len)
                     };
                     let pm = price[k].saturating_add(add);
-                    if pm < price[j] {
+                    let better = pm < price[j]
+                        || (pm == price[j] && come[j] >= 0 && (len as i32) > come[j]);
+                    if better {
                         price[j] = pm;
                         come[j] = len as i32;
                         come_d[j] = dist;

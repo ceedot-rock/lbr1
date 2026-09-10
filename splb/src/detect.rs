@@ -162,10 +162,17 @@ pub fn classify(data: &[u8]) -> Class {
 
 pub fn window_for_class(n: usize, class: Class, asked: u32) -> usize {
     let n = n.max(256);
+    if let Ok(s) = std::env::var("LBR1_WINDOW") {
+        if let Ok(v) = s.parse::<usize>() {
+            if (1 << 16) <= v && v <= (32 << 20) {
+                return v.min(n);
+            }
+        }
+    }
     match class {
         Class::Fill | Class::Sparse => 256,
-        // Large binaries (mozilla): 8 MiB L2 window (ablation −19 KiB on 20 MiB head).
-        Class::Binary if n > 16 * 1024 * 1024 => (1 << 23).min(n),
+        // Large binaries (mozilla): 16 MiB L2 window (stride2 coverage; 20MiB −6.7KiB vs 8MiB).
+        Class::Binary if n > 16 * 1024 * 1024 => (1 << 24).min(n),
         Class::Text | Class::Binary => (asked as usize).min(1 << 22).min(n),
     }
 }
