@@ -1,0 +1,28 @@
+# AWARE pack v1 — poly_d1 CI basement.
+# Hard gate: bit-exact roundtrip + aware_bytes ≤ 21 on int_ramp_256k.
+#
+# Path deps: pulsar submodule (speed-cmp/pulsar-best) is required to compile
+# the splb crate. combined-gc (../../combined-gc) is NOT required — the
+# Combined-GC `aware` feature is off by default so lib tests build on GitHub.
+name: poly-pack-v1
+
+on:
+  push:
+    branches: [main, "aware/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  poly:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: poly pack v1 tests (≤21 B + roundtrip)
+        run: cargo test -p splb --lib poly -- --nocapture
+      - name: aware XZ1-retired
+        run: cargo test -p splb --lib aware -- --nocapture
+      - name: LBHX house KIND_POLY
+        run: cargo test -p splb --lib house -- --nocapture

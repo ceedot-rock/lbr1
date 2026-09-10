@@ -6,6 +6,7 @@
 pub mod asmd;
 pub mod autonoma;
 pub mod aware;
+pub mod house;
 pub mod codex;
 pub mod crc;
 pub mod detect;
@@ -19,6 +20,7 @@ pub mod parse;
 pub mod pcc;
 pub mod pccaq;
 pub mod phrases;
+pub mod poly;
 pub mod pccz;
 pub mod rans;
 pub mod structx;
@@ -46,6 +48,11 @@ pub fn blob_kind(b: &[u8]) -> &'static str {
         "pccz"
     } else if pcc::is_pcc(b) {
         "pcc1"
+    } else if poly::is_poly(b) {
+        match house::unwrap(b) {
+            Ok((_, _, inner)) if !inner.is_empty() => poly::model_tag(inner[0]),
+            _ => "poly",
+        }
     } else if frame::is_tru8(b) {
         "tru8"
     } else if frame::is_tr8x(b) {
@@ -184,6 +191,18 @@ pub fn decode_lbr1(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
 /// House min() of own DECODE_OK genes. Router, not a compressor.
 pub fn encode_best(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
     let mut best: Option<(Vec<u8>, &'static str)> = None;
+    // AWARE pack v1 polyfit peel — early seat when i32-aligned.
+    // Crush-early: a ≤21 B poly pack on a large ramp needs no further house seats.
+    if data.len() >= 8 && data.len() % 4 == 0 {
+        if let Some((p, tag)) = poly::encode(data) {
+            // Extreme peel (e.g. 19 B on 256 KiB ramp) — skip remaining seats.
+            // Do NOT trip on tiny absolute sizes; TRU8 (8 B) must still beat poly on fill.
+            if (p.len() as u64).saturating_mul(1000) < data.len() as u64 {
+                return Some((p, tag));
+            }
+            best = Some((p, tag));
+        }
+    }
     if let Some(a) = encode(data) {
         let tag = if frame::is_tru8(&a) {
             "tru8"
@@ -192,7 +211,11 @@ pub fn encode_best(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
         } else {
             "lbr1"
         };
-        best = Some((a, tag));
+        match &best {
+            None => best = Some((a, tag)),
+            Some((b, _)) if a.len() < b.len() => best = Some((a, tag)),
+            _ => {}
+        }
     }
     if best.as_ref().map(|(_, k)| *k) != Some("bw22") {
         if let Some(b) = pulsar::pulsar_encode(data) {
@@ -371,6 +394,9 @@ pub fn decode(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
 
 /// One gene. No ASMD header. Combined GC decode is last and optional.
 pub fn decode_gene(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if poly::is_poly(buf) {
+        return poly::decode(buf);
+    }
     if frame::is_tru8(buf) {
         return frame::unpack_tru8(buf);
     }

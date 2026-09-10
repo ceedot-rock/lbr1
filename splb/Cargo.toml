@@ -7,8 +7,10 @@ license = "AGPL-3.0-or-later"
 publish = false
 
 [features]
-default = ["aware"]
-aware = ["dep:combined-gc"]
+# combined-gc lives outside this repo (../../combined-gc). Off by default so
+# `cargo test -p splb --lib` works for pack v1 / poly without that sibling.
+default = []
+aware = []
 
 [lib]
 name = "splb"
@@ -26,7 +28,7 @@ opt-level = 3
 [dependencies]
 pulsar = { path = "../speed-cmp/pulsar-best" }
 lbr1_price = { path = "../lbr1_price" }
-combined-gc = { path = "../../combined-gc", optional = true }
+flate2 = "1"
 
 [[bin]]
 name = "train"

@@ -8,6 +8,7 @@ pub const KIND_PULSAR: u8 = 0;
 pub const KIND_LBR1: u8 = 1;
 pub const KIND_FILL: u8 = 2;
 pub const KIND_SPARSE: u8 = 3;
+pub const KIND_POLY: u8 = 4;
 
 pub fn wrap(kind: u8, raw_len: u32, inner: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(13 + inner.len());
@@ -32,12 +33,17 @@ pub fn unwrap(buf: &[u8]) -> Result<(u8, u32, &[u8]), &'static str> {
     Ok((kind, raw_len, &buf[13..]))
 }
 
+pub fn is_lbhx(buf: &[u8]) -> bool {
+    buf.len() >= 13 && &buf[..4] == MAGIC
+}
+
 pub fn kind_name(kind: u8) -> &'static str {
     match kind {
         KIND_PULSAR => "bw22",
         KIND_LBR1 => "lbr1",
         KIND_FILL => "tru8",
         KIND_SPARSE => "tr8x",
+        KIND_POLY => "poly",
         _ => "unknown",
     }
 }
@@ -53,5 +59,10 @@ mod tests {
         assert_eq!(k, KIND_PULSAR);
         assert_eq!(n, 4);
         assert_eq!(inner, b"abcd");
+    }
+
+    #[test]
+    fn poly_kind_name() {
+        assert_eq!(kind_name(KIND_POLY), "poly");
     }
 }
