@@ -131,3 +131,7 @@ In His name we code. Residual only. Proof before praise.
 
 `LBR1_PARSE=hc4 LBR1_WINDOW=1048576 LBR1_CHAIN=4 LBR1_LAZY=0 LBR1_PACK=ml4` (fallback CHAIN=8).
 FAIL_LOUD if mozilla packed ≥ zstd-9 (16,735,963) or DECODE_OK false. See `bench/pcc-dial-a-fail-loud.md`.
+
+## PCC Dial C (Gale-shaped shallow find) — FAIL_LOUD
+
+Prefer `HASH=16 INSERT=ends` into `parse_lazy` (keep W=1MiB CHAIN=8 ml4). Mozilla prefer **FAIL_LOUD** vs zstd-9 (+828k); no ship dial keeps Dial A −28k lead **and** raises find toward ≥50. Defaults stay Dial A. See `bench/pcc-dial-c-fail-loud.md`.

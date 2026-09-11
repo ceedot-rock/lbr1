@@ -534,33 +534,55 @@ pub fn parse_wn(data: &[u8]) -> Vec<Tok> {
 
 /// O(window) memory. Lazy match. Used for large binaries.
 pub fn parse_lazy(data: &[u8], window: usize) -> Vec<Tok> {
-    // PCC daily Dial A (shallower parse): hc4 · W=1MiB · CHAIN=8 · LAZY=0 · PACK=ml4
-    // Prefer CHAIN=4; mozilla bake FAIL_LOUD vs zstd-9 (+135,806) — ship fallback CHAIN=8.
-    //   LBR1_CHAIN=1..256  — max hash-chain probes (default 8)
-    //   LBR1_LAZY=0        — greedy (default for Dial A); LBR1_LAZY=1 restore +1 lookahead
-    //   LBR1_WINDOW=…     — via detect::window_for / env (Dial A: 1048576)
-    // AWARE = legacy alias only in comments/docs.
+    // PCC Dial C probe (Gale-shaped shallow find) — Dial A defaults remain ship:
+    //   hc4 · W=1MiB · CHAIN=8 · LAZY=0 · PACK=ml4 · HASH=17 · INSERT=dense · FIND=price
+    // Prefer Dial C (HASH=16 INSERT=ends) FAIL_LOUD vs zstd-9 on mozilla — see bench/pcc-dial-c-fail-loud.md.
+    // Not Gale's 23M LZ4 wire. ANS waits. Face PCC. AWARE = legacy alias only.
+    //   LBR1_CHAIN=1..256   — max hash-chain probes (default 8)
+    //   LBR1_HASH=16..22    — parse_lazy hash bits (default 17 = Dial A)
+    //   LBR1_INSERT=ends|stride4|dense|gale — match-body insert density (default dense)
+    //   LBR1_FIND=price|gale — bit-priced vs longest-wins probe (default price)
+    //   LBR1_SCOUTS=0|1     — disable scouts for shallower find (default: detect)
+    //   LBR1_LAZY=0         — greedy (default); LBR1_LAZY=1 restore +1 lookahead
+    //   LBR1_WINDOW=…       — via detect::window_for / env (Dial A/C: 1048576)
     let n = data.len();
     let win = window.max(256).next_power_of_two();
     let mask = win - 1;
     let chain_cap = env_usize("LBR1_CHAIN", 8, 1, 256);
+    let hash_bits = env_usize("LBR1_HASH", 17, 16, 22) as u32;
+    let hash_size = 1usize << hash_bits;
+    let insert_mode = std::env::var("LBR1_INSERT")
+        .unwrap_or_else(|_| "dense".into())
+        .to_ascii_lowercase();
     let do_lazy = std::env::var("LBR1_LAZY")
         .ok()
         .map(|s| s != "0" && s != "false" && s != "off")
         .unwrap_or(false);
-    let mut head = vec![-1i32; HASH_SIZE];
+    let mut head = vec![-1i32; hash_size];
     let mut chain = vec![-1i32; win];
     let mut scout_head = vec![-1i32; SCOUT_SIZE];
-    let use_scouts = crate::detect::scouts_wanted(data);
+    let find_mode = std::env::var("LBR1_FIND")
+        .unwrap_or_else(|_| "price".into())
+        .to_ascii_lowercase();
+    let use_scouts = match std::env::var("LBR1_SCOUTS").ok().as_deref() {
+        Some("0") | Some("false") | Some("off") => false,
+        Some("1") | Some("true") | Some("on") => true,
+        _ => crate::detect::scouts_wanted(data),
+    };
     let stride = crate::detect::scout_stride(data).max(1);
     let mut toks = Vec::new();
     let mut i = 0usize;
+
+    let hash_lazy = |a: u8, b: u8, c: u8, d: u8| -> usize {
+        let v = u32::from_le_bytes([a, b, c, d]);
+        (v.wrapping_mul(0x9E3779B1) >> (32 - hash_bits)) as usize
+    };
 
     let insert = |head: &mut [i32], chain: &mut [i32], scout_head: &mut [i32], pos: usize| {
         if pos + 3 >= n {
             return;
         }
-        let h = hash4(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+        let h = hash_lazy(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
         chain[pos & mask] = head[h];
         head[h] = pos as i32;
         if use_scouts && pos % stride == 0 && pos + 8 <= n {
@@ -575,13 +597,28 @@ pub fn parse_lazy(data: &[u8], window: usize) -> Vec<Tok> {
         let floor = if pos > win { (pos - win) as i32 } else { -1 };
         let mut best_l = 0u32;
         let mut best_d = 0u32;
-        let h = hash4(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+        let h = hash_lazy(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
         let mut p = head[h];
         let mut steps = 0;
         while p > floor && steps < chain_cap {
             let j = p as usize;
             if j < pos {
-                consider(&mut best_l, &mut best_d, data, pos, j);
+                if find_mode == "gale" || find_mode == "longest" {
+                    // Gale-shaped: first-byte filter + longest match wins (no bit price).
+                    if data[j] == data[pos]
+                        && data[j + 1] == data[pos + 1]
+                        && data[j + 2] == data[pos + 2]
+                        && data[j + 3] == data[pos + 3]
+                    {
+                        let m = match_len(data, pos, j, MAX_MATCH) as u32;
+                        if m >= MIN_MATCH as u32 && m > best_l {
+                            best_l = m;
+                            best_d = (pos - j) as u32;
+                        }
+                    }
+                } else {
+                    consider(&mut best_l, &mut best_d, data, pos, j);
+                }
                 if best_l as usize == MAX_MATCH {
                     break;
                 }
@@ -592,7 +629,22 @@ pub fn parse_lazy(data: &[u8], window: usize) -> Vec<Tok> {
         if use_scouts && pos + 8 <= n && best_l < 32 {
             let sp = scout_head[hash8(data, pos)];
             if sp > floor && (sp as usize) < pos {
-                consider(&mut best_l, &mut best_d, data, pos, sp as usize);
+                if find_mode == "gale" || find_mode == "longest" {
+                    let j = sp as usize;
+                    if data[j] == data[pos]
+                        && data[j + 1] == data[pos + 1]
+                        && data[j + 2] == data[pos + 2]
+                        && data[j + 3] == data[pos + 3]
+                    {
+                        let m = match_len(data, pos, j, MAX_MATCH) as u32;
+                        if m >= MIN_MATCH as u32 && m > best_l {
+                            best_l = m;
+                            best_d = (pos - j) as u32;
+                        }
+                    }
+                } else {
+                    consider(&mut best_l, &mut best_d, data, pos, sp as usize);
+                }
             }
         }
         (best_d, best_l)
@@ -614,10 +666,41 @@ pub fn parse_lazy(data: &[u8], window: usize) -> Vec<Tok> {
             }
             toks.push(Tok::Match { dist: d0, len: l0 });
             let end = i + l0 as usize;
-            let mut p = i;
-            while p < end {
-                insert(&mut head, &mut chain, &mut scout_head, p);
-                p += if l0 >= 64 { 4 } else { 1 };
+            match insert_mode.as_str() {
+                // Gale-class shallow: only seed endpoints so later finds still see the run.
+                "ends" | "end" | "endpoint" | "endpoints" => {
+                    insert(&mut head, &mut chain, &mut scout_head, i);
+                    if end > i + 1 {
+                        let last = end.saturating_sub(MIN_MATCH);
+                        if last > i {
+                            insert(&mut head, &mut chain, &mut scout_head, last);
+                        }
+                    }
+                }
+                // Always stride-4 through the match body (fewer than dense short matches).
+                "stride4" | "s4" | "4" => {
+                    let mut p = i;
+                    while p < end {
+                        insert(&mut head, &mut chain, &mut scout_head, p);
+                        p += 4;
+                    }
+                }
+                // Gale matcher.c: insert every byte in [i, end).
+                "gale" | "all" => {
+                    let mut p = i;
+                    while p < end {
+                        insert(&mut head, &mut chain, &mut scout_head, p);
+                        p += 1;
+                    }
+                }
+                // Dial A dense: every byte; stride-4 only when match ≥ 64.
+                _ => {
+                    let mut p = i;
+                    while p < end {
+                        insert(&mut head, &mut chain, &mut scout_head, p);
+                        p += if l0 >= 64 { 4 } else { 1 };
+                    }
+                }
             }
             i = end;
         } else {
