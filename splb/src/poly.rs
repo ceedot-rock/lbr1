@@ -16,9 +16,12 @@
 //! repeat (model_id 7):
 //!   model_id:u8=7 | unit_len:u32 | unit_bytes | n:u32
 //!   // decoder: repeat(unit)[:n]  (Theory: n mandatory; rem wrap)
+//! cddg (model_id 8) — silent deep-shelf L0 (NOT Gale daily / hosted AWARE crown):
+//!   model_id:u8=8 | n:u32 | start_plane:u16 | seed:u32 | flag:u8=1  // 12 B
+//!   // raw: u16le plane + u32le dark_q32; cadence_369 (LCG twin of walk_lcg)
 //! ```
-//! model_id: 0=const, 1=poly_d1, 2=poly_d2, 3=affine_i32, 4=poly_d3, 5=walk_d1, 6=walk_lcg, 7=repeat.
-//! Headers: poly_d1=19; affine=18; walk_lcg=9; repeat=9+period (text_repeat_256k→33; json_128k→61).
+//! model_id: 0=const … 7=repeat, 8=cddg.
+//! Headers: poly_d1=19; affine=18; walk_lcg=9; repeat=9+period; cddg=12.
 
 use crate::house;
 
@@ -65,6 +68,7 @@ pub fn model_tag(model_id: u8) -> &'static str {
         MODEL_WALK_D1 => "walk_d1",
         MODEL_WALK_LCG => "walk_lcg",
         MODEL_REPEAT => "repeat",
+        crate::cddg::MODEL_CDDG => "cddg",
         _ => "poly",
     }
 }
@@ -639,7 +643,8 @@ fn try_wrap(data: &[u8], inner: Vec<u8>, tag: &'static str) -> Option<(Vec<u8>, 
 }
 
 /// Encode as LBHX KIND_POLY. Wins only if roundtrip-ok and strictly smaller.
-/// Byte `repeat` (model_id=7) is tried first; then i32 walk/affine/poly MDL.
+/// CDDG (model_id=8) deep-shelf peel when raw matches cadence_369 (zero residual);
+/// then byte `repeat` (7); then i32 walk/affine/poly MDL.
 pub fn encode(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
     let mut best: Option<(Vec<u8>, &'static str)> = None;
     let consider = |best: &mut Option<(Vec<u8>, &'static str)>, cand: Option<(Vec<u8>, &'static str)>| {
@@ -652,6 +657,12 @@ pub fn encode(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
             *best = Some((blob, tag));
         }
     };
+
+    // Silent deep-shelf L0: try before general match when raw matches gen.
+    if let Some((n, start, seed)) = crate::cddg::try_cddg_params(data) {
+        let inner = crate::cddg::pack_cddg(n, start, seed);
+        consider(&mut best, try_wrap(data, inner, "cddg"));
+    }
 
     if let Some(unit) = fit_byte_repeat(data) {
         let inner = pack_repeat(unit, data.len() as u32);
@@ -696,6 +707,13 @@ pub fn decode(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
         let out = expand_repeat(unit, n as usize);
         if out.len() as u32 != raw_len {
             return Err("repeat out");
+        }
+        return Ok(out);
+    }
+    if inner[0] == crate::cddg::MODEL_CDDG {
+        let out = crate::cddg::unpack_cddg(inner)?;
+        if out.len() as u32 != raw_len {
+            return Err("cddg out");
         }
         return Ok(out);
     }
@@ -893,5 +911,68 @@ mod tests {
         assert_eq!(decode(&blob).unwrap(), raw);
         // Non-zero residuals → flag 0 → larger than zero-residual affine header.
         assert!(aware_bytes(&blob).unwrap() > AFFINE_I32_ZERO_HEADER);
+    }
+
+    /// Sealed CDDG fixtures: pack → 12 B, DECODE_OK bit-exact vs .bin.
+    fn cddg_fixture_cases() -> [(&'static str, &'static [u8], &'static [u8], u32, u16, u32); 3] {
+        [
+            (
+                "cddg_spin_1k",
+                include_bytes!("../testdata/cddg-wire/cddg_spin_1k.bin"),
+                include_bytes!("../testdata/cddg-wire/cddg_spin_1k.cddg"),
+                1000,
+                0,
+                369,
+            ),
+            (
+                "cddg_spin_360",
+                include_bytes!("../testdata/cddg-wire/cddg_spin_360.bin"),
+                include_bytes!("../testdata/cddg-wire/cddg_spin_360.cddg"),
+                360,
+                0,
+                369,
+            ),
+            (
+                "cddg_spin_359",
+                include_bytes!("../testdata/cddg-wire/cddg_spin_359.bin"),
+                include_bytes!("../testdata/cddg-wire/cddg_spin_359.cddg"),
+                359,
+                0,
+                369,
+            ),
+        ]
+    }
+
+    #[test]
+    fn cddg_fixtures_pack_12_decode_ok() {
+        use crate::cddg::{self, CDDG_HEADER, MODEL_CDDG};
+        for (name, raw, sealed_hdr, n, start, seed) in cddg_fixture_cases() {
+            assert_eq!(raw.len(), (n as usize) * 6, "{name} raw");
+            let gen = cddg::gen_cddg_v0(n as usize, start, seed);
+            assert_eq!(gen.as_slice(), raw, "{name} gen vs .bin");
+            let packed = cddg::pack_cddg(n, start, seed);
+            assert_eq!(packed.len(), CDDG_HEADER, "{name} pack 12 B");
+            assert_eq!(packed.as_slice(), sealed_hdr, "{name} pack vs .cddg");
+            assert_eq!(packed[0], MODEL_CDDG);
+            let back = cddg::unpack_cddg(&packed).expect(name);
+            assert_eq!(back.as_slice(), raw, "{name} DECODE_OK");
+            let det = cddg::try_cddg_params(raw).expect("detect");
+            assert_eq!(det, (n, start, seed), "{name} detect");
+            let (blob, tag) = encode(raw).expect("encode");
+            assert_eq!(tag, "cddg", "{name} tag");
+            assert_eq!(aware_bytes(&blob).unwrap(), CDDG_HEADER);
+            assert_eq!(decode(&blob).unwrap(), raw, "{name} LBHX DECODE_OK");
+        }
+    }
+
+    #[test]
+    fn cddg_spin_359_encode_best_deep_shelf() {
+        // 359*6 = 2154, not %4 — encode_best must still seat CDDG (not Gale).
+        let raw = include_bytes!("../testdata/cddg-wire/cddg_spin_359.bin");
+        assert_eq!(raw.len() % 4, 2);
+        let (blob, tag) = crate::encode_best(raw).expect("house");
+        assert_eq!(tag, "cddg");
+        assert_eq!(aware_bytes(&blob).unwrap(), crate::cddg::CDDG_HEADER);
+        assert_eq!(crate::decode(&blob).unwrap(), raw);
     }
 }

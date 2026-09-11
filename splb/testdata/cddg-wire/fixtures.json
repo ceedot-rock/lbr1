@@ -1,0 +1,34 @@
+{
+  "model_id": 8,
+  "wire": "/workspace/corpora/cddg-wire-v0.md",
+  "header_bytes": 12,
+  "fixtures": [
+    {
+      "name": "cddg_spin_1k",
+      "n": 1000,
+      "start_plane": 0,
+      "seed": 369,
+      "raw_bytes": 6000,
+      "pack_bytes": 12,
+      "DECODE_OK": true
+    },
+    {
+      "name": "cddg_spin_360",
+      "n": 360,
+      "start_plane": 0,
+      "seed": 369,
+      "raw_bytes": 2160,
+      "pack_bytes": 12,
+      "DECODE_OK": true
+    },
+    {
+      "name": "cddg_spin_359",
+      "n": 359,
+      "start_plane": 0,
+      "seed": 369,
+      "raw_bytes": 2154,
+      "pack_bytes": 12,
+      "DECODE_OK": true
+    }
+  ]
+}
