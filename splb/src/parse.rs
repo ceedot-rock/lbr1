@@ -236,6 +236,15 @@ pub fn parse(data: &[u8], window: usize) -> Vec<Tok> {
 pub fn parse_class(data: &[u8], window: usize, class: crate::detect::Class) -> Vec<Tok> {
     let n = data.len();
     if n == 0 { return Vec::new(); }
+    // Daily dial: LBR1_PARSE=lazy|hc4 forces hash-chain lazy finder even on large files.
+    // Default unset keeps max/PCC BT4 path. Does not change bitstream format.
+    let daily_lazy = matches!(
+        std::env::var("LBR1_PARSE").ok().as_deref(),
+        Some("lazy") | Some("hc4")
+    );
+    if daily_lazy {
+        return parse_lazy(data, window);
+    }
     // Full DP tables are O(n) and OOM on mozilla in 2 GB. Stream instead.
     // Large binaries: BT4 + 4-rep DP (own pathway, 4 MiB window).
     if n > 3 * 1024 * 1024 {
@@ -525,9 +534,20 @@ pub fn parse_wn(data: &[u8]) -> Vec<Tok> {
 
 /// O(window) memory. Lazy match. Used for large binaries.
 pub fn parse_lazy(data: &[u8], window: usize) -> Vec<Tok> {
+    // PCC daily Dial A (shallower parse): hc4 · W=1MiB · CHAIN=8 · LAZY=0 · PACK=ml4
+    // Prefer CHAIN=4; mozilla bake FAIL_LOUD vs zstd-9 (+135,806) — ship fallback CHAIN=8.
+    //   LBR1_CHAIN=1..256  — max hash-chain probes (default 8)
+    //   LBR1_LAZY=0        — greedy (default for Dial A); LBR1_LAZY=1 restore +1 lookahead
+    //   LBR1_WINDOW=…     — via detect::window_for / env (Dial A: 1048576)
+    // AWARE = legacy alias only in comments/docs.
     let n = data.len();
     let win = window.max(256).next_power_of_two();
     let mask = win - 1;
+    let chain_cap = env_usize("LBR1_CHAIN", 8, 1, 256);
+    let do_lazy = std::env::var("LBR1_LAZY")
+        .ok()
+        .map(|s| s != "0" && s != "false" && s != "off")
+        .unwrap_or(false);
     let mut head = vec![-1i32; HASH_SIZE];
     let mut chain = vec![-1i32; win];
     let mut scout_head = vec![-1i32; SCOUT_SIZE];
@@ -558,7 +578,7 @@ pub fn parse_lazy(data: &[u8], window: usize) -> Vec<Tok> {
         let h = hash4(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
         let mut p = head[h];
         let mut steps = 0;
-        while p > floor && steps < 64 {
+        while p > floor && steps < chain_cap {
             let j = p as usize;
             if j < pos {
                 consider(&mut best_l, &mut best_d, data, pos, j);
@@ -581,14 +601,16 @@ pub fn parse_lazy(data: &[u8], window: usize) -> Vec<Tok> {
     while i < n {
         let (d0, l0) = find(&head, &chain, &scout_head, i);
         if l0 >= MIN_MATCH as u32 {
-            let (d1, l1) = find(&head, &chain, &scout_head, i + 1);
-            let take_lazy = l1 >= MIN_MATCH as u32
-                && bits_saved(l1, d1.max(1)) > bits_saved(l0, d0.max(1)) + 8;
-            if take_lazy {
-                toks.push(Tok::Lit(data[i]));
-                insert(&mut head, &mut chain, &mut scout_head, i);
-                i += 1;
-                continue;
+            if do_lazy {
+                let (d1, l1) = find(&head, &chain, &scout_head, i + 1);
+                let take_lazy = l1 >= MIN_MATCH as u32
+                    && bits_saved(l1, d1.max(1)) > bits_saved(l0, d0.max(1)) + 8;
+                if take_lazy {
+                    toks.push(Tok::Lit(data[i]));
+                    insert(&mut head, &mut chain, &mut scout_head, i);
+                    i += 1;
+                    continue;
+                }
             }
             toks.push(Tok::Match { dist: d0, len: l0 });
             let end = i + l0 as usize;

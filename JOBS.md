@@ -126,3 +126,8 @@ Do not email Mahoney a second pulsar line (it did not beat 55,745,438). PCC is a
 Beginner map with citations: `SlidPhiLabs/docs/GAPS_NCA_SWARM.md`.
 
 In His name we code. Residual only. Proof before praise.
+
+## PCC daily Dial A (shallower parse)
+
+`LBR1_PARSE=hc4 LBR1_WINDOW=1048576 LBR1_CHAIN=4 LBR1_LAZY=0 LBR1_PACK=ml4` (fallback CHAIN=8).
+FAIL_LOUD if mozilla packed ≥ zstd-9 (16,735,963) or DECODE_OK false. See `bench/pcc-dial-a-fail-loud.md`.

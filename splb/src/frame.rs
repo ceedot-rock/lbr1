@@ -15,6 +15,8 @@ pub const VER_ML3: u8 = 7;
 pub const VER_ML4: u8 = 8;
 /// LBR1 + FastCM lit residual (daily L3). Own pathway.
 pub const VER_FCM: u8 = 9;
+/// ML4 models + LZMA-style u32 range coder (Enc32). Own pathway (not bit-exact ML4).
+pub const VER_ML4F: u8 = 10;
 /// True 8-byte solid-run frame: TR8 + symbol + u32 len.
 pub const TRU8: &[u8; 3] = b"TR8";
 pub const TRU8_LEN: usize = 8;
@@ -373,6 +375,30 @@ fn lit_pairs(toks: &[Tok], raw: &[u8]) -> Vec<(u8, u8)> {
 }
 
 pub fn pack(toks: &[Tok], orig_len: usize, window: u32, raw: &[u8]) -> Vec<u8> {
+    // LBR1_PACK=ml4|ml4f: VER_ML4F (u32 RC) — ML4 models, faster wire (Kernel finder-bake).
+    // LBR1_PACK=ml4exact: bit-exact VER_ML4 (u128 interval RC).
+    if let Some(mode) = std::env::var("LBR1_PACK").ok() {
+        if mode == "ml4" || mode == "ml4f" {
+            let ml4 = crate::range::encode_toks_mlit4f(toks, raw);
+            let mut alt = Vec::with_capacity(13 + 4 + ml4.len());
+            alt.extend_from_slice(MAGIC);
+            alt.push(VER_ML4F);
+            alt.extend_from_slice(&(orig_len as u32).to_le_bytes());
+            alt.extend_from_slice(&window.to_le_bytes());
+            put_blob(&mut alt, &ml4);
+            return alt;
+        }
+        if mode == "ml4exact" {
+            let ml4 = crate::range::encode_toks_mlit4(toks, raw);
+            let mut alt = Vec::with_capacity(13 + 4 + ml4.len());
+            alt.extend_from_slice(MAGIC);
+            alt.push(VER_ML4);
+            alt.extend_from_slice(&(orig_len as u32).to_le_bytes());
+            alt.extend_from_slice(&window.to_le_bytes());
+            put_blob(&mut alt, &ml4);
+            return alt;
+        }
+    }
     let (flags, lens, dists) = split_streams(toks);
     let pairs = lit_pairs(toks, raw);
     let mut out = Vec::new();
@@ -381,7 +407,17 @@ pub fn pack(toks: &[Tok], orig_len: usize, window: u32, raw: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&(orig_len as u32).to_le_bytes());
     out.extend_from_slice(&window.to_le_bytes());
     let lits: Vec<u8> = pairs.iter().map(|&(_, b)| b).collect();
+    // LBR1_PACK=fast|daily → o0 only; o1 → single o1 (no FastCM/ML/RC bake).
+    let pack_mode = std::env::var("LBR1_PACK").ok();
+    let pack_fast_early = matches!(pack_mode.as_deref(), Some("fast") | Some("daily") | Some("o1"));
     let o0 = rans::rans_encode(&lits);
+    let (kind, lit_blob) = if matches!(pack_mode.as_deref(), Some("fast") | Some("daily")) {
+        (0u8, o0)
+    } else if pack_mode.as_deref() == Some("o1") {
+        let pairs = &pairs;
+        let o1 = rans_o1::rans_encode_o1(pairs);
+        if o1.len() < o0.len() { (1u8, o1) } else { (0u8, o0) }
+    } else {
     let mut sent = crate::sentinel::Sentinel::new();
     let obs = crate::sentinel::Sentinel::observe_stream(&lits, o0.len());
     let tick = sent.step(obs, obs[0], 0.0);
@@ -394,7 +430,7 @@ pub fn pack(toks: &[Tok], orig_len: usize, window: u32, raw: &[u8]) -> Vec<u8> {
             alpha += 1;
         }
     }
-    let (kind, lit_blob) = if crate::sentinel::alleviate_skip_o1(&tick, lits.len(), alpha) {
+    if crate::sentinel::alleviate_skip_o1(&tick, lits.len(), alpha) {
         (0u8, o0)
     } else {
         let o1 = rans_o1::rans_encode_o1(&pairs);
@@ -423,12 +459,25 @@ pub fn pack(toks: &[Tok], orig_len: usize, window: u32, raw: &[u8]) -> Vec<u8> {
             }
         }
         (kind, blob)
+    }
     };
     put_blob(&mut out, &rans::rans_encode(&flags));
     out.push(kind);
     put_blob(&mut out, &lit_blob);
     put_blob(&mut out, &rans::rans_encode(&lens));
     put_blob(&mut out, &rans::rans_encode(&dists));
+
+    // Daily/fast pack dial (Kernel finder-bake): LBR1_PACK=fast|daily
+    // Emit single frame; skip ML/RC candidate bake + in-pack DECODE verifies.
+    let pack_fast = matches!(
+        std::env::var("LBR1_PACK").ok().as_deref(),
+        Some("fast") | Some("daily") | Some("o1")
+    );
+    if pack_fast {
+        return out;
+    }
+
+    // LBR1_PACK=ml4 handled at top of pack (VER_ML4F).
 
     // Candidate set: VER4 (+ optional FastCM lits), VER_ML*, VER_RC. Pick smallest DECODE_OK.
     let mut winner: Option<Vec<u8>> = None;
@@ -499,12 +548,19 @@ pub fn unpack_bytes(buf: &[u8]) -> Result<(Vec<u8>, u32), &'static str> {
     if buf.len() < 13 || &buf[..4] != MAGIC {
         return Err("magic");
     }
-    if buf[4] == VER_RC || buf[4] == VER_ML || buf[4] == VER_ML3 || buf[4] == VER_ML4 {
+    if buf[4] == VER_RC
+        || buf[4] == VER_ML
+        || buf[4] == VER_ML3
+        || buf[4] == VER_ML4
+        || buf[4] == VER_ML4F
+    {
         let orig = u32::from_le_bytes(buf[5..9].try_into().unwrap()) as usize;
         let mut pos = 13usize;
         let rc = take_blob(buf, &mut pos)?;
         let window = u32::from_le_bytes(buf[9..13].try_into().unwrap());
-        let out = if buf[4] == VER_ML4 {
+        let out = if buf[4] == VER_ML4F {
+            crate::range::decode_toks_mlit4f(rc, orig)?
+        } else if buf[4] == VER_ML4 {
             crate::range::decode_toks_mlit4(rc, orig)?
         } else if buf[4] == VER_ML3 {
             crate::range::decode_toks_mlit3(rc, orig)?

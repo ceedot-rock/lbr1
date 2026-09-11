@@ -10,13 +10,18 @@ pub struct Enc {
 
 impl Enc {
     pub fn new() -> Self {
+        Self::with_capacity(0)
+    }
+
+    pub fn with_capacity(cap: usize) -> Self {
         Self {
             low: 0,
             high: u128::MAX,
-            out: Vec::new(),
+            out: Vec::with_capacity(cap),
         }
     }
 
+    #[inline(always)]
     fn renormalize(&mut self) {
         loop {
             let lb = (self.low >> 120) as u8;
@@ -25,23 +30,27 @@ impl Enc {
                 break;
             }
             self.out.push(lb);
-            self.low = (self.low << 8) & u128::MAX;
+            self.low <<= 8;
             self.high = (self.high << 8) | 0xFF;
         }
     }
 
+    #[inline(always)]
     pub fn bit(&mut self, bit: u32, p: &mut u16) {
         self.bit_p(bit, *p);
         if bit == 0 {
-            *p = (*p).saturating_add((2048 - *p) >> 5).min(2047);
+            let x = *p;
+            *p = (x + ((2048 - x) >> 5)).min(2047);
         } else {
-            *p = (*p - (*p >> 5)).max(1);
+            let x = *p;
+            *p = (x - (x >> 5)).max(1);
         }
     }
 
     /// Mixer-supplied p. Does not adapt p.
+    #[inline(always)]
     pub fn bit_p(&mut self, bit: u32, p: u16) {
-        let p = p.clamp(1, 2047);
+        // p kept in [1,2047] by bit()/PINIT; skip clamp on hot path (bit-exact).
         let span = self.high - self.low;
         let mid = self.low + (span >> 11) * (p as u128);
         if bit == 0 {
@@ -163,6 +172,174 @@ impl<'a> Dec<'a> {
     }
 }
 
+
+/// LZMA-style 32-bit range encoder (carry-cache ShiftLow). Own wire —
+/// not bit-exact with `Enc` (u128 interval). Used by VER_ML4F.
+const RC32_TOP: u32 = 1 << 24;
+std::thread_local! {
+    static RC32_BITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+pub fn rc32_bits_reset() { RC32_BITS.with(|c| c.set(0)); }
+pub fn rc32_bits_get() -> u64 { RC32_BITS.with(|c| c.get()) }
+
+
+pub struct Enc32 {
+    low: u64,
+    range: u32,
+    cache: u8,
+    cache_size: u64,
+    out: Vec<u8>,
+}
+
+impl Enc32 {
+    pub fn new() -> Self {
+        Self::with_capacity(0)
+    }
+
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            low: 0,
+            range: 0xFFFF_FFFF,
+            cache: 0,
+            cache_size: 1,
+            out: Vec::with_capacity(cap),
+        }
+    }
+
+    #[inline(always)]
+    fn shift_low(&mut self) {
+        let high = (self.low >> 32) as u32;
+        if (self.low as u32) < 0xFF00_0000 || high != 0 {
+            let mut temp = self.cache as u32;
+            loop {
+                self.out.push(temp.wrapping_add(high) as u8);
+                temp = 0xFF;
+                self.cache_size -= 1;
+                if self.cache_size == 0 {
+                    break;
+                }
+            }
+            self.cache = (self.low >> 24) as u8;
+        }
+        self.cache_size += 1;
+        self.low = (self.low & 0xFF_FFFF) << 8;
+    }
+
+    #[inline(always)]
+    pub fn bit(&mut self, bit: u32, p: &mut u16) {
+        let bound = (self.range >> 11) * (*p as u32);
+        if bit == 0 {
+            self.range = bound;
+            let x = *p;
+            *p = (x + ((2048 - x) >> 5)).min(2047);
+        } else {
+            self.low += bound as u64;
+            self.range -= bound;
+            let x = *p;
+            *p = (x - (x >> 5)).max(1);
+        }
+        while self.range < RC32_TOP {
+            self.range <<= 8;
+            self.shift_low();
+        }
+    }
+
+    #[inline(always)]
+    pub fn bits(&mut self, v: u32, n: u32, ppos: &mut [u16]) {
+        for i in 0..n {
+            let b = (v >> i) & 1;
+            let idx = (i as usize).min(ppos.len() - 1);
+            self.bit(b, &mut ppos[idx]);
+        }
+    }
+
+    #[inline(always)]
+    pub fn byte(&mut self, b: u8, tree: &mut [u16; 256]) {
+        self.bits(b as u32, 8, tree);
+    }
+
+    pub fn finish(mut self) -> Vec<u8> {
+        for _ in 0..5 {
+            self.shift_low();
+        }
+        self.out
+    }
+}
+
+pub struct Dec32<'a> {
+    src: &'a [u8],
+    i: usize,
+    code: u32,
+    range: u32,
+}
+
+impl<'a> Dec32<'a> {
+    pub fn open(src: &'a [u8]) -> Result<Self, &'static str> {
+        if src.len() < 5 {
+            return Err("rc32 short");
+        }
+        let mut d = Self {
+            src,
+            i: 0,
+            code: 0,
+            range: 0xFFFF_FFFF,
+        };
+        for _ in 0..5 {
+            d.code = (d.code << 8) | d.take() as u32;
+        }
+        Ok(d)
+    }
+
+    #[inline(always)]
+    fn take(&mut self) -> u8 {
+        if self.i < self.src.len() {
+            let b = self.src[self.i];
+            self.i += 1;
+            b
+        } else {
+            0
+        }
+    }
+
+    #[inline(always)]
+    pub fn bit(&mut self, p: &mut u16) -> u32 {
+        let bound = (self.range >> 11) * (*p as u32);
+        let bit = if self.code < bound {
+            self.range = bound;
+            let x = *p;
+            *p = (x + ((2048 - x) >> 5)).min(2047);
+            0
+        } else {
+            self.code -= bound;
+            self.range -= bound;
+            let x = *p;
+            *p = (x - (x >> 5)).max(1);
+            1
+        };
+        while self.range < RC32_TOP {
+            self.code = (self.code << 8) | self.take() as u32;
+            self.range <<= 8;
+        }
+        bit
+    }
+
+    #[inline(always)]
+    pub fn bits(&mut self, n: u32, ppos: &mut [u16]) -> u32 {
+        let mut v = 0u32;
+        for i in 0..n {
+            let idx = (i as usize).min(ppos.len() - 1);
+            let b = self.bit(&mut ppos[idx]);
+            v |= b << i;
+        }
+        v
+    }
+
+    #[inline(always)]
+    pub fn byte(&mut self, tree: &mut [u16; 256]) -> u8 {
+        self.bits(8, tree) as u8
+    }
+}
+
 fn init256() -> [u16; 256] {
     [PINIT; 256]
 }
@@ -205,7 +382,81 @@ fn dist_ctx(phi: usize, pos: usize, prev_match: bool) -> usize {
     (phi & 7) * 8 + (pos & 7)
 }
 
-fn put_tree(e: &mut Enc, v: u32, nbits: u32, tree: &mut [u16]) {
+
+trait BitOut {
+    fn bit(&mut self, bit: u32, p: &mut u16);
+    fn bits(&mut self, v: u32, n: u32, ppos: &mut [u16]);
+    fn byte(&mut self, b: u8, tree: &mut [u16; 256]);
+}
+
+impl BitOut for Enc {
+    #[inline(always)]
+    fn bit(&mut self, bit: u32, p: &mut u16) {
+        Enc::bit(self, bit, p)
+    }
+    #[inline(always)]
+    fn bits(&mut self, v: u32, n: u32, ppos: &mut [u16]) {
+        Enc::bits(self, v, n, ppos)
+    }
+    #[inline(always)]
+    fn byte(&mut self, b: u8, tree: &mut [u16; 256]) {
+        Enc::byte(self, b, tree)
+    }
+}
+
+impl BitOut for Enc32 {
+    #[inline(always)]
+    fn bit(&mut self, bit: u32, p: &mut u16) {
+        Enc32::bit(self, bit, p)
+    }
+    #[inline(always)]
+    fn bits(&mut self, v: u32, n: u32, ppos: &mut [u16]) {
+        Enc32::bits(self, v, n, ppos)
+    }
+    #[inline(always)]
+    fn byte(&mut self, b: u8, tree: &mut [u16; 256]) {
+        Enc32::byte(self, b, tree)
+    }
+}
+
+trait BitIn {
+    fn bit(&mut self, p: &mut u16) -> u32;
+    fn bits(&mut self, n: u32, ppos: &mut [u16]) -> u32;
+    fn byte(&mut self, tree: &mut [u16; 256]) -> u8;
+}
+
+impl BitIn for Dec<'_> {
+    #[inline(always)]
+    fn bit(&mut self, p: &mut u16) -> u32 {
+        Dec::bit(self, p)
+    }
+    #[inline(always)]
+    fn bits(&mut self, n: u32, ppos: &mut [u16]) -> u32 {
+        Dec::bits(self, n, ppos)
+    }
+    #[inline(always)]
+    fn byte(&mut self, tree: &mut [u16; 256]) -> u8 {
+        Dec::byte(self, tree)
+    }
+}
+
+impl BitIn for Dec32<'_> {
+    #[inline(always)]
+    fn bit(&mut self, p: &mut u16) -> u32 {
+        Dec32::bit(self, p)
+    }
+    #[inline(always)]
+    fn bits(&mut self, n: u32, ppos: &mut [u16]) -> u32 {
+        Dec32::bits(self, n, ppos)
+    }
+    #[inline(always)]
+    fn byte(&mut self, tree: &mut [u16; 256]) -> u8 {
+        Dec32::byte(self, tree)
+    }
+}
+
+#[inline(always)]
+fn put_tree<E: BitOut>(e: &mut E, v: u32, nbits: u32, tree: &mut [u16]) {
     let mut node = 1usize;
     for i in (0..nbits).rev() {
         let b = (v >> i) & 1;
@@ -215,7 +466,7 @@ fn put_tree(e: &mut Enc, v: u32, nbits: u32, tree: &mut [u16]) {
     }
 }
 
-fn get_tree(d: &mut Dec, nbits: u32, tree: &mut [u16]) -> u32 {
+fn get_tree<D: BitIn>(d: &mut D, nbits: u32, tree: &mut [u16]) -> u32 {
     let mut node = 1usize;
     let mut v = 0u32;
     for _ in 0..nbits {
@@ -227,8 +478,9 @@ fn get_tree(d: &mut Dec, nbits: u32, tree: &mut [u16]) -> u32 {
     v
 }
 
-fn put_dist(
-    e: &mut Enc,
+#[inline(always)]
+fn put_dist<E: BitOut>(
+    e: &mut E,
     d: u32,
     slot_tree: &mut [u16],
     bit_p: &mut [u16; 32],
@@ -251,8 +503,8 @@ fn put_dist(
     }
 }
 
-fn get_dist(
-    dec: &mut Dec,
+fn get_dist<D: BitIn>(
+    dec: &mut D,
     slot_tree: &mut [u16],
     bit_p: &mut [u16; 32],
     align: &mut [[u16; 16]; 4],
@@ -279,28 +531,51 @@ fn get_dist(
 /// until they diverge. Own range coder, not xz.
 const MLIT: usize = 768;
 
-fn put_mlit(e: &mut Enc, b: u8, match_byte: u8, probs: &mut [u16; MLIT]) {
+#[inline(always)]
+fn put_mlit<E: BitOut>(e: &mut E, b: u8, match_byte: u8, probs: &mut [u16; MLIT]) {
     let mut ctx = 1usize;
     let mut same = true;
     for i in (0..8).rev() {
         let bit = ((b >> i) & 1) as u32;
         if same {
             let mb = ((match_byte >> i) & 1) as u32;
-            let idx = (0x100 + ((mb as usize) << 8) + ctx).min(MLIT - 1);
+            let idx = 0x100 + ((mb as usize) << 8) + ctx;
             e.bit(bit, &mut probs[idx]);
             ctx = (ctx << 1) | bit as usize;
             if bit != mb {
                 same = false;
             }
         } else {
-            let idx = ctx.min(255);
+            let idx = if ctx < 256 { ctx } else { 255 };
             e.bit(bit, &mut probs[idx]);
             ctx = (ctx << 1) | bit as usize;
         }
     }
 }
 
-fn get_mlit(d: &mut Dec, match_byte: u8, probs: &mut [u16; MLIT]) -> u8 {
+#[inline(always)]
+fn put_mlit_fast(e: &mut Enc32, b: u8, match_byte: u8, probs: &mut [u16; MLIT]) {
+    let mut ctx = 1usize;
+    let mut same = true;
+    for i in (0..8).rev() {
+        let bit = ((b >> i) & 1) as u32;
+        if same {
+            let mb = ((match_byte >> i) & 1) as u32;
+            let idx = 0x100 + ((mb as usize) << 8) + ctx;
+            e.bit(bit, unsafe { probs.get_unchecked_mut(idx) });
+            ctx = (ctx << 1) | bit as usize;
+            if bit != mb {
+                same = false;
+            }
+        } else {
+            let idx = if ctx < 256 { ctx } else { 255 };
+            e.bit(bit, unsafe { probs.get_unchecked_mut(idx) });
+            ctx = (ctx << 1) | bit as usize;
+        }
+    }
+}
+
+fn get_mlit<D: BitIn>(d: &mut D, match_byte: u8, probs: &mut [u16; MLIT]) -> u8 {
     let mut ctx = 1usize;
     let mut same = true;
     let mut v = 0u8;
@@ -333,7 +608,8 @@ fn mlit_wide_idx(phi: usize, prev: u8, pos: usize) -> usize {
     lit_idx(phi, prev, pos)
 }
 
-fn put_len(e: &mut Enc, extra: u32, p0: &mut u16, p1: &mut u16, p3: &mut [u16], p4: &mut [u16], p11: &mut [u16]) {
+#[inline(always)]
+fn put_len<E: BitOut>(e: &mut E, extra: u32, p0: &mut u16, p1: &mut u16, p3: &mut [u16], p4: &mut [u16], p11: &mut [u16]) {
     if extra < 8 {
         e.bit(0, p0);
         put_tree(e, extra, 3, p3);
@@ -354,7 +630,7 @@ fn put_len(e: &mut Enc, extra: u32, p0: &mut u16, p1: &mut u16, p3: &mut [u16], 
     }
 }
 
-fn get_len(d: &mut Dec, p0: &mut u16, p1: &mut u16, p3: &mut [u16], p4: &mut [u16], p11: &mut [u16]) -> u32 {
+fn get_len<D: BitIn>(d: &mut D, p0: &mut u16, p1: &mut u16, p3: &mut [u16], p4: &mut [u16], p11: &mut [u16]) -> u32 {
     if d.bit(p0) == 0 {
         get_tree(d, 3, p3)
     } else if d.bit(p1) == 0 {
@@ -393,6 +669,7 @@ pub(crate) fn phi_step(phi: usize, is_match: bool, is_rep: bool, dist: u32, len:
     }
 }
 
+#[inline(always)]
 fn bump_reps(reps: &mut [u32; 4], d: u32) {
     if d == 0 || d == reps[0] {
         return;
@@ -639,6 +916,12 @@ pub fn encode_toks_mlit4(toks: &[crate::parse::Tok], raw: &[u8]) -> Vec<u8> {
     encode_toks_ex(toks, raw, true, true, true)
 }
 
+/// VER_ML4F: ML4 models (8192 matched-lit banks) + LZMA-style Enc32 range coder.
+/// Theory-ok: same contexts as VER_ML4; u32 RC is not bit-exact with u128 VER_ML4.
+pub fn encode_toks_mlit4f(toks: &[crate::parse::Tok], raw: &[u8]) -> Vec<u8> {
+    encode_toks_mlit4f_inner(toks, raw)
+}
+
 fn encode_toks_ex(
     toks: &[crate::parse::Tok],
     raw: &[u8],
@@ -647,7 +930,258 @@ fn encode_toks_ex(
     wide: bool,
 ) -> Vec<u8> {
     use crate::parse::{Tok, MIN_MATCH};
-    let mut e = Enc::new();
+    let mut e = Enc::with_capacity(raw.len() / 2 + 64);
+    let mut p_match = [PINIT; 64];
+    let mut p_rep = [PINIT; 8];
+    let mut p_which = [PINIT; 8];
+    let mut p_len0 = [PINIT; 32];
+    let mut p_len1 = [PINIT; 32];
+    let mut p_len3 = [[PINIT; 8]; 32];
+    let mut p_len4 = [[PINIT; 16]; 32];
+    let mut p_len11 = [[PINIT; 16]; 32];
+    let mut lit_after_lit = vec![init256(); LIT_MODELS];
+    let mut lit_after_match = vec![init256(); LIT_MODELS];
+    let mut lit_after_rep = if rep_bank && !wide {
+        vec![init256(); LIT_MODELS]
+    } else {
+        Vec::new()
+    };
+    let nmlit = if !matched_lits {
+        0
+    } else if wide {
+        LIT_MODELS
+    } else {
+        256 * POS_STATES
+    };
+    let mut mlit = vec![[PINIT; MLIT]; nmlit];
+    let mut mlit_rep = if wide {
+        vec![[PINIT; MLIT]; LIT_MODELS]
+    } else {
+        Vec::new()
+    };
+    let mut dist_slot = [[PINIT; 64]; 64];
+    let mut dist_bits = [PINIT; 32];
+    let mut dist_align = [[PINIT; 16]; 4];
+    let mut phi = 0usize;
+    let mut reps = [0u32; 4];
+    let mut pos = 0usize;
+    let mut prev = 0u8;
+    let mut prev_len = 0u32;
+    let mut prev_match = false;
+    let mut prev_rep = false;
+    for t in toks {
+        match *t {
+            Tok::Lit(b) => {
+                e.bit(0, &mut p_match[match_ctx(phi, prev, pos, prev_match)]);
+                let have_mb = prev_match
+                    && reps[0] > 0
+                    && (reps[0] as usize) <= pos
+                    && pos <= raw.len();
+                if matched_lits && have_mb && (wide || !prev_rep) {
+                    let mb = raw[pos - reps[0] as usize];
+                    let slot = if wide {
+                        mlit_wide_idx(phi, prev, pos)
+                    } else {
+                        mlit_idx(prev, pos)
+                    };
+                    if wide && prev_rep {
+                        put_mlit(&mut e, b, mb, &mut mlit_rep[slot]);
+                    } else {
+                        put_mlit(&mut e, b, mb, &mut mlit[slot]);
+                    }
+                } else {
+                    let li = lit_idx(phi, prev, pos);
+                    if prev_match && prev_rep && rep_bank && !wide {
+                        e.byte(b, &mut lit_after_rep[li]);
+                    } else if prev_match {
+                        e.byte(b, &mut lit_after_match[li]);
+                    } else {
+                        e.byte(b, &mut lit_after_lit[li]);
+                    }
+                }
+                prev = b;
+                pos += 1;
+                prev_match = false;
+                prev_rep = false;
+                phi = phi_step(phi, false, false, 0, 0);
+            }
+            Tok::Match { dist, len } => {
+                e.bit(1, &mut p_match[match_ctx(phi, prev, pos, prev_match)]);
+                let extra = len.saturating_sub(MIN_MATCH as u32);
+                let lc = len_ctx(phi, prev_len);
+                put_len(
+                    &mut e,
+                    extra,
+                    &mut p_len0[lc],
+                    &mut p_len1[lc],
+                    &mut p_len3[lc],
+                    &mut p_len4[lc],
+                    &mut p_len11[lc],
+                );
+                let d = if dist == 0 { reps[0] } else { dist };
+                let mut which = 4u32;
+                for i in 0..4 {
+                    if reps[i] != 0 && reps[i] == d {
+                        which = i as u32;
+                        break;
+                    }
+                }
+                if which < 4 {
+                    e.bit(1, &mut p_rep[phi]);
+                    e.bits(which, 2, &mut p_which);
+                } else {
+                    e.bit(0, &mut p_rep[phi]);
+                    let nd = if d == 0 { 1 } else { d };
+                    let dc = dist_ctx(phi, pos, prev_match);
+                    put_dist(
+                        &mut e,
+                        nd,
+                        &mut dist_slot[dc],
+                        &mut dist_bits,
+                        &mut dist_align,
+                    );
+                    bump_reps(&mut reps, nd);
+                }
+                if which < 4 {
+                    bump_reps(&mut reps, d);
+                }
+                pos += len as usize;
+                if pos > 0 && pos <= raw.len() {
+                    prev = raw[pos - 1];
+                }
+                prev_len = len;
+                prev_match = true;
+                prev_rep = which < 4;
+                phi = phi_step(phi, true, which < 4, d, len);
+            }
+        }
+    }
+    e.finish()
+}
+
+
+/// Specialized VER_ML4F encoder: wide matched-lits, no dynamic bank flags.
+fn encode_toks_mlit4f_inner(toks: &[crate::parse::Tok], raw: &[u8]) -> Vec<u8> {
+    use crate::parse::{Tok, MIN_MATCH};
+    // Full ML4-width banks (8192). Enc32 changes wire vs VER_ML4; contexts match ML4.
+    const FMODELS: usize = LIT_MODELS;
+    #[inline(always)]
+    fn fidx(phi: usize, prev: u8, pos: usize) -> usize {
+        lit_idx(phi, prev, pos)
+    }
+    let mut e = Enc32::with_capacity(raw.len() / 2 + 64);
+    let mut p_match = [PINIT; 64];
+    let mut p_rep = [PINIT; 8];
+    let mut p_which = [PINIT; 8];
+    let mut p_len0 = [PINIT; 32];
+    let mut p_len1 = [PINIT; 32];
+    let mut p_len3 = [[PINIT; 8]; 32];
+    let mut p_len4 = [[PINIT; 16]; 32];
+    let mut p_len11 = [[PINIT; 16]; 32];
+    let mut lit_after_lit = vec![init256(); FMODELS];
+    let mut lit_after_match = vec![init256(); FMODELS];
+    let mut mlit = vec![[PINIT; MLIT]; FMODELS];
+    let mut mlit_rep = vec![[PINIT; MLIT]; FMODELS];
+    let mut dist_slot = [[PINIT; 64]; 64];
+    let mut dist_bits = [PINIT; 32];
+    let mut dist_align = [[PINIT; 16]; 4];
+    let mut phi = 0usize;
+    let mut reps = [0u32; 4];
+    let mut pos = 0usize;
+    let mut prev = 0u8;
+    let mut prev_len = 0u32;
+    let mut prev_match = false;
+    let mut prev_rep = false;
+    let raw_len = raw.len();
+    for t in toks {
+        match *t {
+            Tok::Lit(b) => {
+                e.bit(0, &mut p_match[match_ctx(phi, prev, pos, prev_match)]);
+                let have_mb = prev_match && reps[0] > 0 && (reps[0] as usize) <= pos && pos <= raw_len;
+                if have_mb {
+                    let mb = unsafe { *raw.get_unchecked(pos - reps[0] as usize) };
+                    let slot = fidx(phi, prev, pos);
+                    if prev_rep {
+                        put_mlit_fast(&mut e, b, mb, &mut mlit_rep[slot]);
+                    } else {
+                        put_mlit_fast(&mut e, b, mb, &mut mlit[slot]);
+                    }
+                } else {
+                    let li = fidx(phi, prev, pos);
+                    if prev_match {
+                        e.byte(b, &mut lit_after_match[li]);
+                    } else {
+                        e.byte(b, &mut lit_after_lit[li]);
+                    }
+                }
+                prev = b;
+                pos += 1;
+                prev_match = false;
+                prev_rep = false;
+                phi = phi_step(phi, false, false, 0, 0);
+            }
+            Tok::Match { dist, len } => {
+                e.bit(1, &mut p_match[match_ctx(phi, prev, pos, prev_match)]);
+                let extra = len.saturating_sub(MIN_MATCH as u32);
+                let lc = len_ctx(phi, prev_len);
+                put_len(
+                    &mut e,
+                    extra,
+                    &mut p_len0[lc],
+                    &mut p_len1[lc],
+                    &mut p_len3[lc],
+                    &mut p_len4[lc],
+                    &mut p_len11[lc],
+                );
+                let d = if dist == 0 { reps[0] } else { dist };
+                let mut which = 4u32;
+                for i in 0..4 {
+                    if reps[i] != 0 && reps[i] == d {
+                        which = i as u32;
+                        break;
+                    }
+                }
+                if which < 4 {
+                    e.bit(1, &mut p_rep[phi]);
+                    e.bits(which, 2, &mut p_which);
+                    bump_reps(&mut reps, d);
+                } else {
+                    e.bit(0, &mut p_rep[phi]);
+                    let nd = if d == 0 { 1 } else { d };
+                    let dc = dist_ctx(phi, pos, prev_match);
+                    put_dist(
+                        &mut e,
+                        nd,
+                        &mut dist_slot[dc],
+                        &mut dist_bits,
+                        &mut dist_align,
+                    );
+                    bump_reps(&mut reps, nd);
+                }
+                pos += len as usize;
+                if pos > 0 && pos <= raw_len {
+                    prev = unsafe { *raw.get_unchecked(pos - 1) };
+                }
+                prev_len = len;
+                prev_match = true;
+                prev_rep = which < 4;
+                phi = phi_step(phi, true, which < 4, d, len);
+            }
+        }
+    }
+    e.finish()
+}
+
+
+fn encode_toks_ex_rc32(
+    toks: &[crate::parse::Tok],
+    raw: &[u8],
+    matched_lits: bool,
+    rep_bank: bool,
+    wide: bool,
+) -> Vec<u8> {
+    use crate::parse::{Tok, MIN_MATCH};
+    let mut e = Enc32::with_capacity(raw.len() / 2 + 64);
     let mut p_match = [PINIT; 64];
     let mut p_rep = [PINIT; 8];
     let mut p_which = [PINIT; 8];
@@ -792,6 +1326,10 @@ pub fn decode_toks_mlit4(buf: &[u8], orig: usize) -> Result<Vec<u8>, &'static st
     decode_toks_ex(buf, orig, true, true, true)
 }
 
+pub fn decode_toks_mlit4f(buf: &[u8], orig: usize) -> Result<Vec<u8>, &'static str> {
+    decode_toks_mlit4f_inner(buf, orig)
+}
+
 fn decode_toks_ex(
     buf: &[u8],
     orig: usize,
@@ -801,6 +1339,243 @@ fn decode_toks_ex(
 ) -> Result<Vec<u8>, &'static str> {
     use crate::parse::MIN_MATCH;
     let mut d = Dec::open(buf)?;
+    let mut p_match = [PINIT; 64];
+    let mut p_rep = [PINIT; 8];
+    let mut p_which = [PINIT; 8];
+    let mut p_len0 = [PINIT; 32];
+    let mut p_len1 = [PINIT; 32];
+    let mut p_len3 = [[PINIT; 8]; 32];
+    let mut p_len4 = [[PINIT; 16]; 32];
+    let mut p_len11 = [[PINIT; 16]; 32];
+    let mut lit_after_lit = vec![init256(); LIT_MODELS];
+    let mut lit_after_match = vec![init256(); LIT_MODELS];
+    let mut lit_after_rep = if rep_bank && !wide {
+        vec![init256(); LIT_MODELS]
+    } else {
+        Vec::new()
+    };
+    let nmlit = if !matched_lits {
+        0
+    } else if wide {
+        LIT_MODELS
+    } else {
+        256 * POS_STATES
+    };
+    let mut mlit = vec![[PINIT; MLIT]; nmlit];
+    let mut mlit_rep = if wide {
+        vec![[PINIT; MLIT]; LIT_MODELS]
+    } else {
+        Vec::new()
+    };
+    let mut dist_slot = [[PINIT; 64]; 64];
+    let mut dist_bits = [PINIT; 32];
+    let mut dist_align = [[PINIT; 16]; 4];
+    let mut phi = 0usize;
+    let mut reps = [0u32; 4];
+    let mut out = Vec::with_capacity(orig);
+    let mut prev = 0u8;
+    let mut prev_len = 0u32;
+    let mut prev_match = false;
+    let mut prev_rep = false;
+    while out.len() < orig {
+        let m = d.bit(&mut p_match[match_ctx(phi, prev, out.len(), prev_match)]);
+        if m == 0 {
+            let pos = out.len();
+            let have_mb = prev_match && reps[0] > 0 && (reps[0] as usize) <= pos;
+            let b = if matched_lits && have_mb && (wide || !prev_rep) {
+                let mb = out[pos - reps[0] as usize];
+                let slot = if wide {
+                    mlit_wide_idx(phi, prev, pos)
+                } else {
+                    mlit_idx(prev, pos)
+                };
+                if wide && prev_rep {
+                    get_mlit(&mut d, mb, &mut mlit_rep[slot])
+                } else {
+                    get_mlit(&mut d, mb, &mut mlit[slot])
+                }
+            } else {
+                let li = lit_idx(phi, prev, pos);
+                if prev_match && prev_rep && rep_bank && !wide {
+                    d.byte(&mut lit_after_rep[li])
+                } else if prev_match {
+                    d.byte(&mut lit_after_match[li])
+                } else {
+                    d.byte(&mut lit_after_lit[li])
+                }
+            };
+            out.push(b);
+            prev = b;
+            prev_match = false;
+            prev_rep = false;
+            phi = phi_step(phi, false, false, 0, 0);
+        } else {
+            let lc = len_ctx(phi, prev_len);
+            let extra = get_len(
+                &mut d,
+                &mut p_len0[lc],
+                &mut p_len1[lc],
+                &mut p_len3[lc],
+                &mut p_len4[lc],
+                &mut p_len11[lc],
+            );
+            let nlen = extra as usize + MIN_MATCH;
+            let is_rep = d.bit(&mut p_rep[phi]) == 1;
+            let dist = if is_rep {
+                let which = d.bits(2, &mut p_which) as usize;
+                if which > 3 || reps[which] == 0 {
+                    return Err("rc rep");
+                }
+                let got = reps[which];
+                bump_reps(&mut reps, got);
+                got
+            } else {
+                let dc = dist_ctx(phi, out.len(), prev_match);
+                let got = get_dist(&mut d, &mut dist_slot[dc], &mut dist_bits, &mut dist_align);
+                if got == 0 {
+                    return Err("rc d0");
+                }
+                bump_reps(&mut reps, got);
+                got
+            };
+            let dd = dist as usize;
+            if dd == 0 || dd > out.len() {
+                return Err("rc dist");
+            }
+            if out.len() + nlen > orig {
+                return Err("rc ov");
+            }
+            for _ in 0..nlen {
+                let b = out[out.len() - dd];
+                out.push(b);
+            }
+            prev = *out.last().unwrap();
+            prev_len = nlen as u32;
+            prev_match = true;
+            prev_rep = is_rep;
+            phi = phi_step(phi, true, is_rep, dist, nlen as u32);
+        }
+    }
+    Ok(out)
+}
+
+
+fn decode_toks_mlit4f_inner(buf: &[u8], orig: usize) -> Result<Vec<u8>, &'static str> {
+    use crate::parse::MIN_MATCH;
+    const FMODELS: usize = LIT_MODELS;
+    #[inline(always)]
+    fn fidx(phi: usize, prev: u8, pos: usize) -> usize {
+        lit_idx(phi, prev, pos)
+    }
+    let mut d = Dec32::open(buf)?;
+    let mut p_match = [PINIT; 64];
+    let mut p_rep = [PINIT; 8];
+    let mut p_which = [PINIT; 8];
+    let mut p_len0 = [PINIT; 32];
+    let mut p_len1 = [PINIT; 32];
+    let mut p_len3 = [[PINIT; 8]; 32];
+    let mut p_len4 = [[PINIT; 16]; 32];
+    let mut p_len11 = [[PINIT; 16]; 32];
+    let mut lit_after_lit = vec![init256(); FMODELS];
+    let mut lit_after_match = vec![init256(); FMODELS];
+    let mut mlit = vec![[PINIT; MLIT]; FMODELS];
+    let mut mlit_rep = vec![[PINIT; MLIT]; FMODELS];
+    let mut dist_slot = [[PINIT; 64]; 64];
+    let mut dist_bits = [PINIT; 32];
+    let mut dist_align = [[PINIT; 16]; 4];
+    let mut phi = 0usize;
+    let mut reps = [0u32; 4];
+    let mut out = Vec::with_capacity(orig);
+    let mut prev = 0u8;
+    let mut prev_len = 0u32;
+    let mut prev_match = false;
+    let mut prev_rep = false;
+    while out.len() < orig {
+        let m = d.bit(&mut p_match[match_ctx(phi, prev, out.len(), prev_match)]);
+        if m == 0 {
+            let pos = out.len();
+            let have_mb = prev_match && reps[0] > 0 && (reps[0] as usize) <= pos;
+            let b = if have_mb {
+                let mb = out[pos - reps[0] as usize];
+                let slot = fidx(phi, prev, pos);
+                if prev_rep {
+                    get_mlit(&mut d, mb, &mut mlit_rep[slot])
+                } else {
+                    get_mlit(&mut d, mb, &mut mlit[slot])
+                }
+            } else {
+                let li = fidx(phi, prev, pos);
+                if prev_match {
+                    d.byte(&mut lit_after_match[li])
+                } else {
+                    d.byte(&mut lit_after_lit[li])
+                }
+            };
+            out.push(b);
+            prev = b;
+            prev_match = false;
+            prev_rep = false;
+            phi = phi_step(phi, false, false, 0, 0);
+        } else {
+            let lc = len_ctx(phi, prev_len);
+            let extra = get_len(
+                &mut d,
+                &mut p_len0[lc],
+                &mut p_len1[lc],
+                &mut p_len3[lc],
+                &mut p_len4[lc],
+                &mut p_len11[lc],
+            );
+            let nlen = extra as usize + MIN_MATCH;
+            let is_rep = d.bit(&mut p_rep[phi]) == 1;
+            let dist = if is_rep {
+                let which = d.bits(2, &mut p_which) as usize;
+                if which > 3 || reps[which] == 0 {
+                    return Err("rc rep");
+                }
+                let got = reps[which];
+                bump_reps(&mut reps, got);
+                got
+            } else {
+                let dc = dist_ctx(phi, out.len(), prev_match);
+                let got = get_dist(&mut d, &mut dist_slot[dc], &mut dist_bits, &mut dist_align);
+                if got == 0 {
+                    return Err("rc d0");
+                }
+                bump_reps(&mut reps, got);
+                got
+            };
+            let dd = dist as usize;
+            if dd == 0 || dd > out.len() {
+                return Err("rc dist");
+            }
+            if out.len() + nlen > orig {
+                return Err("rc ov");
+            }
+            for _ in 0..nlen {
+                let b = out[out.len() - dd];
+                out.push(b);
+            }
+            prev = *out.last().unwrap();
+            prev_len = nlen as u32;
+            prev_match = true;
+            prev_rep = is_rep;
+            phi = phi_step(phi, true, is_rep, dist, nlen as u32);
+        }
+    }
+    Ok(out)
+}
+
+
+fn decode_toks_ex_rc32(
+    buf: &[u8],
+    orig: usize,
+    matched_lits: bool,
+    rep_bank: bool,
+    wide: bool,
+) -> Result<Vec<u8>, &'static str> {
+    use crate::parse::MIN_MATCH;
+    let mut d = Dec32::open(buf)?;
     let mut p_match = [PINIT; 64];
     let mut p_rep = [PINIT; 8];
     let mut p_which = [PINIT; 8];
@@ -963,6 +1738,9 @@ mod tests {
         let blob4 = encode_toks_mlit4(&t, &s);
         let back4 = decode_toks_mlit4(&blob4, s.len()).expect("mlit4");
         assert_eq!(back4, s);
+        let blob4f = encode_toks_mlit4f(&t, &s);
+        let back4f = decode_toks_mlit4f(&blob4f, s.len()).expect("mlit4f");
+        assert_eq!(back4f, s);
     }
 
     #[test]
