@@ -148,7 +148,7 @@ pub fn encode_window(data: &[u8], window: u32) -> Option<Vec<u8>> {
         Some("fast") | Some("daily") | Some("o1") | Some("ml4") | Some("ml4f") | Some("ml4exact")
     ) || matches!(
         std::env::var("LBR1_PARSE").ok().as_deref(),
-        Some("lazy") | Some("hc4")
+        Some("lazy") | Some("hc4") | Some("lz4t") | Some("tag1")
     );
     if !daily {
         consider_wraps(data, &mut best);

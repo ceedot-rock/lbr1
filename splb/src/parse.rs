@@ -51,6 +51,18 @@ fn hash4(a: u8, b: u8, c: u8, d: u8) -> usize {
     (v.wrapping_mul(0x9E3779B1) >> (32 - HASH_BITS)) as usize
 }
 
+/// Index + 16-bit tag for LZ4-class single-slot find (`LBR1_PARSE=lz4t`).
+/// Tag uses low bits of the same multiply so cheap reject can skip a 4-byte load
+/// when the overwritten slot's fingerprint disagrees.
+#[inline]
+fn hash4_tag(a: u8, b: u8, c: u8, d: u8) -> (usize, u16) {
+    let v = u32::from_le_bytes([a, b, c, d]);
+    let h = v.wrapping_mul(0x9E3779B1);
+    let idx = (h >> (32 - HASH_BITS)) as usize;
+    let tag = (h & 0xFFFF) as u16;
+    (idx, tag)
+}
+
 pub(crate) fn match_len(data: &[u8], i: usize, j: usize, cap: usize) -> usize {
     let max = cap.min(data.len() - i).min(data.len() - j);
     let mut n = 0;
@@ -237,13 +249,13 @@ pub fn parse_class(data: &[u8], window: usize, class: crate::detect::Class) -> V
     let n = data.len();
     if n == 0 { return Vec::new(); }
     // Daily dial: LBR1_PARSE=lazy|hc4 forces hash-chain lazy finder even on large files.
-    // Default unset keeps max/PCC BT4 path. Does not change bitstream format.
-    let daily_lazy = matches!(
-        std::env::var("LBR1_PARSE").ok().as_deref(),
-        Some("lazy") | Some("hc4")
-    );
-    if daily_lazy {
-        return parse_lazy(data, window);
+    // Measure dial: LBR1_PARSE=lz4t|tag1 selects LZ4-class tagged/single-slot find
+    // (no chain table). Default unset keeps max/PCC BT4 path. Does not change bitstream.
+    // Dial A ship defaults (hc4 / W=1MiB / CHAIN=8 / HASH=17) stay unchanged.
+    match std::env::var("LBR1_PARSE").ok().as_deref() {
+        Some("lazy") | Some("hc4") => return parse_lazy(data, window),
+        Some("lz4t") | Some("tag1") => return parse_lz4t(data, window),
+        _ => {}
     }
     // Full DP tables are O(n) and OOM on mozilla in 2 GB. Stream instead.
     // Large binaries: BT4 + 4-rep DP (own pathway, 4 MiB window).
@@ -712,6 +724,102 @@ pub fn parse_lazy(data: &[u8], window: usize) -> Vec<Tok> {
     toks
 }
 
+/// Measure-only find class: LZ4-class **tagged / single-slot** hash.
+///
+/// Select with `LBR1_PARSE=lz4t` (alias `tag1`). Same WINDOW / Tok emit / PACK=ml4
+/// path as `parse_lazy`; **does not** retarget Dial A defaults (`hc4` / CHAIN=8).
+///
+/// Structure: one head entry per hash bucket (overwrite on insert) plus a 16-bit
+/// tag fingerprint. Aimed at cutting Dial A false-candidate tax (~5 probes/find,
+/// ~64% early-reject; chain+verify ≈65% of find) by eliminating the chain walk.
+/// Size vs zstd-9 is Kernel bake territory — this dial is measure-only, not ship.
+pub fn parse_lz4t(data: &[u8], window: usize) -> Vec<Tok> {
+    // Env (measure dial; Dial A hc4 path untouched):
+    //   LBR1_PARSE=lz4t|tag1  — select this finder
+    //   LBR1_WINDOW=…         — via detect::window_for / env (Dial A bake: 1048576)
+    //   LBR1_LAZY=0           — greedy (default); LBR1_LAZY=1 enables +1 lookahead
+    // No LBR1_CHAIN: single-slot has no chain table.
+    let n = data.len();
+    let win = window.max(256).next_power_of_two();
+    let do_lazy = std::env::var("LBR1_LAZY")
+        .ok()
+        .map(|s| s != "0" && s != "false" && s != "off")
+        .unwrap_or(false);
+    let mut head = vec![-1i32; HASH_SIZE];
+    let mut tags = vec![0u16; HASH_SIZE];
+    let mut scout_head = vec![-1i32; SCOUT_SIZE];
+    let use_scouts = crate::detect::scouts_wanted(data);
+    let stride = crate::detect::scout_stride(data).max(1);
+    let mut toks = Vec::new();
+    let mut i = 0usize;
+
+    let insert = |head: &mut [i32], tags: &mut [u16], scout_head: &mut [i32], pos: usize| {
+        if pos + 3 >= n {
+            return;
+        }
+        let (h, tag) = hash4_tag(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+        head[h] = pos as i32;
+        tags[h] = tag;
+        if use_scouts && pos % stride == 0 && pos + 8 <= n {
+            scout_head[hash8(data, pos)] = pos as i32;
+        }
+    };
+
+    let find = |head: &[i32], tags: &[u16], scout_head: &[i32], pos: usize| -> (u32, u32) {
+        if pos + MIN_MATCH > n {
+            return (0, 0);
+        }
+        let floor = if pos > win { (pos - win) as i32 } else { -1 };
+        let mut best_l = 0u32;
+        let mut best_d = 0u32;
+        let (h, tag) = hash4_tag(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+        let p = head[h];
+        // Single slot: at most one candidate. Tag mismatch → reject without
+        // loading the candidate's 4 bytes (false-candidate cut).
+        if p > floor && (p as usize) < pos && tags[h] == tag {
+            consider(&mut best_l, &mut best_d, data, pos, p as usize);
+        }
+        if use_scouts && pos + 8 <= n && best_l < 32 {
+            let sp = scout_head[hash8(data, pos)];
+            if sp > floor && (sp as usize) < pos {
+                consider(&mut best_l, &mut best_d, data, pos, sp as usize);
+            }
+        }
+        (best_d, best_l)
+    };
+
+    while i < n {
+        let (d0, l0) = find(&head, &tags, &scout_head, i);
+        if l0 >= MIN_MATCH as u32 {
+            if do_lazy {
+                let (d1, l1) = find(&head, &tags, &scout_head, i + 1);
+                let take_lazy = l1 >= MIN_MATCH as u32
+                    && bits_saved(l1, d1.max(1)) > bits_saved(l0, d0.max(1)) + 8;
+                if take_lazy {
+                    toks.push(Tok::Lit(data[i]));
+                    insert(&mut head, &mut tags, &mut scout_head, i);
+                    i += 1;
+                    continue;
+                }
+            }
+            toks.push(Tok::Match { dist: d0, len: l0 });
+            let end = i + l0 as usize;
+            let mut p = i;
+            while p < end {
+                insert(&mut head, &mut tags, &mut scout_head, p);
+                p += if l0 >= 64 { 4 } else { 1 };
+            }
+            i = end;
+        } else {
+            toks.push(Tok::Lit(data[i]));
+            insert(&mut head, &mut tags, &mut scout_head, i);
+            i += 1;
+        }
+    }
+    toks
+}
+
+
 pub fn expand(toks: &[Tok]) -> Result<Vec<u8>, &'static str> {
     let mut out = Vec::new();
     for t in toks {
@@ -787,6 +895,19 @@ mod tests {
         assert_eq!(back, s);
 
         let t = parse_lazy(&s, DEFAULT_WINDOW);
+        assert_eq!(expand(&t).unwrap(), s);
+        assert!(t.iter().any(|x| matches!(x, Tok::Match { .. })));
+    }
+
+    #[test]
+    fn lz4t_roundtrip_motif() {
+        let mut s = Vec::new();
+        let m = b"QWERTYUIOPASDFGH";
+        for _ in 0..200 {
+            s.extend_from_slice(m);
+            s.extend_from_slice(&[0u8; 32]);
+        }
+        let t = parse_lz4t(&s, DEFAULT_WINDOW);
         assert_eq!(expand(&t).unwrap(), s);
         assert!(t.iter().any(|x| matches!(x, Tok::Match { .. })));
     }
