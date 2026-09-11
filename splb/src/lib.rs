@@ -22,6 +22,7 @@ pub mod pcc;
 pub mod pccaq;
 pub mod phrases;
 pub mod poly;
+pub mod cddg;
 pub mod pccz;
 pub mod rans;
 pub mod structx;
@@ -198,7 +199,8 @@ pub fn encode_best(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
     let mut best: Option<(Vec<u8>, &'static str)> = None;
     // AWARE pack v1 polyfit peel — early seat when i32-aligned.
     // Crush-early: a ≤21 B poly pack on a large ramp needs no further house seats.
-    if data.len() >= 8 && data.len() % 4 == 0 {
+    // %4 for i32 peels; %6 for CDDG deep-shelf (sample stride 6). Repeat also lives in poly::encode.
+    if data.len() >= 6 && (data.len() % 4 == 0 || data.len() % 6 == 0) {
         if let Some((p, tag)) = poly::encode(data) {
             // Extreme peel (e.g. 19 B on 256 KiB ramp) — skip remaining seats.
             // Do NOT trip on tiny absolute sizes; TRU8 (8 B) must still beat poly on fill.
