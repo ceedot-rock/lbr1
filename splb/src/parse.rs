@@ -534,11 +534,12 @@ pub fn parse_wn(data: &[u8]) -> Vec<Tok> {
 
 /// O(window) memory. Lazy match. Used for large binaries.
 pub fn parse_lazy(data: &[u8], window: usize) -> Vec<Tok> {
-    // PCC daily Dial A (shallower parse): hc4 · W=1MiB · CHAIN=8 · LAZY=0 · PACK=ml4
-    // Prefer CHAIN=4; mozilla bake FAIL_LOUD vs zstd-9 (+135,806) — ship fallback CHAIN=8.
+    // PCC daily Dial B (mid-window): hc4 · W=512KiB · CHAIN=8 · LAZY=0 · PACK=ml4
+    // Prefer W=256KiB; mozilla bake FAIL_LOUD vs zstd-9 (+120,472) — ship fallback W=512KiB.
+    // Dial A kept CHAIN=8 (CHAIN=4 FAIL_LOUD +135k). Avoid W=64K historically +406k.
     //   LBR1_CHAIN=1..256  — max hash-chain probes (default 8)
-    //   LBR1_LAZY=0        — greedy (default for Dial A); LBR1_LAZY=1 restore +1 lookahead
-    //   LBR1_WINDOW=…     — via detect::window_for / env (Dial A: 1048576)
+    //   LBR1_LAZY=0        — greedy (default for Dial B); LBR1_LAZY=1 restore +1 lookahead
+    //   LBR1_WINDOW=…     — via detect::window_for / env (Dial B: 524288)
     // AWARE = legacy alias only in comments/docs.
     let n = data.len();
     let win = window.max(256).next_power_of_two();

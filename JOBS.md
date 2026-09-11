@@ -131,3 +131,9 @@ In His name we code. Residual only. Proof before praise.
 
 `LBR1_PARSE=hc4 LBR1_WINDOW=1048576 LBR1_CHAIN=4 LBR1_LAZY=0 LBR1_PACK=ml4` (fallback CHAIN=8).
 FAIL_LOUD if mozilla packed ≥ zstd-9 (16,735,963) or DECODE_OK false. See `bench/pcc-dial-a-fail-loud.md`.
+
+## PCC daily Dial B (mid-window)
+
+`LBR1_PARSE=hc4 LBR1_WINDOW=262144 LBR1_CHAIN=8 LBR1_LAZY=0 LBR1_PACK=ml4` (fallback WINDOW=524288).
+Prefer 256 KiB FAIL_LOUD on mozilla; **ship WINDOW=524288**. Avoid W=64K (+406k historical).
+FAIL_LOUD if mozilla packed ≥ zstd-9 (16,735,963) or DECODE_OK false. See `bench/pcc-dial-b-fail-loud.md`.

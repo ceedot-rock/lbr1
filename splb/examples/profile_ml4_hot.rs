@@ -1,4 +1,5 @@
-//! PCC Dial A profile — hc4 W=1MiB CHAIN=4 LAZY=0 PACK=ml4
+//! PCC Dial B profile — hc4 W=512KiB CHAIN=8 LAZY=0 PACK=ml4
+//! Prefer W=256KiB FAIL_LOUD vs zstd-9; ship W=512KiB.
 //! FAIL_LOUD if packed >= zstd-9 (16_735_963) or DECODE_OK false.
 fn main() {
     let path = std::env::args()
@@ -8,8 +9,8 @@ fn main() {
     let w: usize = std::env::var("LBR1_WINDOW")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1 << 20);
-    // Dial A defaults (shallower parse). CHAIN=8 ships (CHAIN=4 FAIL_LOUD on mozilla size).
+        .unwrap_or(524288);
+    // Dial B defaults (mid-window). W=512KiB ships (W=256KiB FAIL_LOUD on mozilla size).
     if std::env::var("LBR1_PARSE").is_err() {
         std::env::set_var("LBR1_PARSE", "hc4");
     }
