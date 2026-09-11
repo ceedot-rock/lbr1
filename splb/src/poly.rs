@@ -19,9 +19,12 @@
 //! cddg (model_id 8) — silent deep-shelf L0 (NOT Gale daily / hosted AWARE crown):
 //!   model_id:u8=8 | n:u32 | start_plane:u16 | seed:u32 | flag:u8=1  // 12 B
 //!   // raw: u16le plane + u32le dark_q32; cadence_369 (LCG twin of walk_lcg)
+//! cddg_dual (model_id 9) — dual spin + published NCA web (silent deep shelf):
+//!   model_id:u8=9 | n:u32 | start_s:u16 | seed_s:u32 | start_c:u16 | seed_c:u32
+//!   | link_rule:u8 | flag:u8=1  // 19 B; raw 16 B/sample; exact match only
 //! ```
-//! model_id: 0=const … 7=repeat, 8=cddg.
-//! Headers: poly_d1=19; affine=18; walk_lcg=9; repeat=9+period; cddg=12.
+//! model_id: 0=const … 7=repeat, 8=cddg, 9=cddg_dual.
+//! Headers: poly_d1=19; affine=18; walk_lcg=9; repeat=9+period; cddg=12; cddg_dual=19.
 
 use crate::house;
 
@@ -69,6 +72,7 @@ pub fn model_tag(model_id: u8) -> &'static str {
         MODEL_WALK_LCG => "walk_lcg",
         MODEL_REPEAT => "repeat",
         crate::cddg::MODEL_CDDG => "cddg",
+        crate::cddg::MODEL_CDDG_DUAL => "cddg_dual",
         _ => "poly",
     }
 }
@@ -643,8 +647,8 @@ fn try_wrap(data: &[u8], inner: Vec<u8>, tag: &'static str) -> Option<(Vec<u8>, 
 }
 
 /// Encode as LBHX KIND_POLY. Wins only if roundtrip-ok and strictly smaller.
-/// CDDG (model_id=8) deep-shelf peel when raw matches cadence_369 (zero residual);
-/// then byte `repeat` (7); then i32 walk/affine/poly MDL.
+/// CDDG dual (9) + CDDG v0 (8) deep-shelf peels on exact cadence match (MDL between
+/// L0 peels); then byte `repeat` (7); then i32 walk/affine/poly MDL.
 pub fn encode(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
     let mut best: Option<(Vec<u8>, &'static str)> = None;
     let consider = |best: &mut Option<(Vec<u8>, &'static str)>, cand: Option<(Vec<u8>, &'static str)>| {
@@ -658,7 +662,12 @@ pub fn encode(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
         }
     };
 
-    // Silent deep-shelf L0: try before general match when raw matches gen.
+    // Silent deep-shelf L0: exact-match CDDG peels before general match.
+    // MDL between L0 peels (consider picks strictly smaller).
+    if let Some((n, ss, seeds, sc, seedc, rule)) = crate::cddg::try_cddg_dual_params(data) {
+        let inner = crate::cddg::pack_cddg_dual(n, ss, seeds, sc, seedc, rule);
+        consider(&mut best, try_wrap(data, inner, "cddg_dual"));
+    }
     if let Some((n, start, seed)) = crate::cddg::try_cddg_params(data) {
         let inner = crate::cddg::pack_cddg(n, start, seed);
         consider(&mut best, try_wrap(data, inner, "cddg"));
@@ -707,6 +716,13 @@ pub fn decode(buf: &[u8]) -> Result<Vec<u8>, &'static str> {
         let out = expand_repeat(unit, n as usize);
         if out.len() as u32 != raw_len {
             return Err("repeat out");
+        }
+        return Ok(out);
+    }
+    if inner[0] == crate::cddg::MODEL_CDDG_DUAL {
+        let out = crate::cddg::unpack_cddg_dual(inner)?;
+        if out.len() as u32 != raw_len {
+            return Err("cddg9 out");
         }
         return Ok(out);
     }
@@ -973,6 +989,99 @@ mod tests {
         let (blob, tag) = crate::encode_best(raw).expect("house");
         assert_eq!(tag, "cddg");
         assert_eq!(aware_bytes(&blob).unwrap(), crate::cddg::CDDG_HEADER);
+        assert_eq!(crate::decode(&blob).unwrap(), raw);
+    }
+
+    /// Sealed CDDG dual v1 fixtures: pack → 19 B, DECODE_OK bit-exact vs .bin.
+    fn cddg_dual_fixture_cases() -> [(
+        &'static str,
+        &'static [u8],
+        &'static [u8],
+        u32,
+        u16,
+        u32,
+        u16,
+        u32,
+        u8,
+    ); 4] {
+        use crate::cddg::{LINK_RING_NEIGHBOR, LINK_XOR_MIX};
+        [
+            (
+                "cddg_dual_1k",
+                include_bytes!("../testdata/cddg-wire/cddg_dual_1k.bin"),
+                include_bytes!("../testdata/cddg-wire/cddg_dual_1k.cddg9"),
+                1000,
+                0,
+                369,
+                0,
+                963,
+                LINK_XOR_MIX,
+            ),
+            (
+                "cddg_dual_360",
+                include_bytes!("../testdata/cddg-wire/cddg_dual_360.bin"),
+                include_bytes!("../testdata/cddg-wire/cddg_dual_360.cddg9"),
+                360,
+                0,
+                369,
+                180,
+                963,
+                LINK_XOR_MIX,
+            ),
+            (
+                "cddg_dual_359",
+                include_bytes!("../testdata/cddg-wire/cddg_dual_359.bin"),
+                include_bytes!("../testdata/cddg-wire/cddg_dual_359.cddg9"),
+                359,
+                0,
+                369,
+                0,
+                963,
+                LINK_XOR_MIX,
+            ),
+            (
+                "cddg_dual_ring_64",
+                include_bytes!("../testdata/cddg-wire/cddg_dual_ring_64.bin"),
+                include_bytes!("../testdata/cddg-wire/cddg_dual_ring_64.cddg9"),
+                64,
+                0,
+                369,
+                0,
+                963,
+                LINK_RING_NEIGHBOR,
+            ),
+        ]
+    }
+
+    #[test]
+    fn cddg_dual_fixtures_pack_19_decode_ok() {
+        use crate::cddg::{self, CDDG_DUAL_HEADER, MODEL_CDDG_DUAL};
+        for (name, raw, sealed_hdr, n, ss, seeds, sc, seedc, rule) in cddg_dual_fixture_cases() {
+            assert_eq!(raw.len(), (n as usize) * 16, "{name} raw");
+            let gen = cddg::gen_cddg_dual_v1(n as usize, ss, seeds, sc, seedc, rule).expect(name);
+            assert_eq!(gen.as_slice(), raw, "{name} gen vs .bin");
+            let packed = cddg::pack_cddg_dual(n, ss, seeds, sc, seedc, rule);
+            assert_eq!(packed.len(), CDDG_DUAL_HEADER, "{name} pack 19 B");
+            assert_eq!(packed.as_slice(), sealed_hdr, "{name} pack vs .cddg9");
+            assert_eq!(packed[0], MODEL_CDDG_DUAL);
+            let back = cddg::unpack_cddg_dual(&packed).expect(name);
+            assert_eq!(back.as_slice(), raw, "{name} DECODE_OK");
+            let det = cddg::try_cddg_dual_params(raw).expect("detect");
+            assert_eq!(det, (n, ss, seeds, sc, seedc, rule), "{name} detect");
+            let (blob, tag) = encode(raw).expect("encode");
+            assert_eq!(tag, "cddg_dual", "{name} tag");
+            assert_eq!(aware_bytes(&blob).unwrap(), CDDG_DUAL_HEADER);
+            assert_eq!(decode(&blob).unwrap(), raw, "{name} LBHX DECODE_OK");
+        }
+    }
+
+    #[test]
+    fn cddg_dual_359_encode_best_deep_shelf() {
+        // 359*16 = 5744 — encode_best must seat dual (not Gale / hosted).
+        let raw = include_bytes!("../testdata/cddg-wire/cddg_dual_359.bin");
+        let (blob, tag) = crate::encode_best(raw).expect("house");
+        assert_eq!(tag, "cddg_dual");
+        assert_eq!(aware_bytes(&blob).unwrap(), crate::cddg::CDDG_DUAL_HEADER);
         assert_eq!(crate::decode(&blob).unwrap(), raw);
     }
 }

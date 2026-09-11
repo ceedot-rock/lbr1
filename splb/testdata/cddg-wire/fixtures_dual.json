@@ -1,0 +1,57 @@
+{
+  "model_id": 9,
+  "header_bytes": 19,
+  "sample_bytes": 16,
+  "seal": "/workspace/corpora/cddg-wire-v1.md",
+  "fixtures": [
+    {
+      "name": "cddg_dual_1k",
+      "n": 1000,
+      "start_s": 0,
+      "seed_s": 369,
+      "start_c": 0,
+      "seed_c": 963,
+      "link_rule": 0,
+      "raw_bytes": 16000,
+      "pack_bytes": 19,
+      "decode_ok": true
+    },
+    {
+      "name": "cddg_dual_360",
+      "n": 360,
+      "start_s": 0,
+      "seed_s": 369,
+      "start_c": 180,
+      "seed_c": 963,
+      "link_rule": 0,
+      "raw_bytes": 5760,
+      "pack_bytes": 19,
+      "decode_ok": true
+    },
+    {
+      "name": "cddg_dual_359",
+      "n": 359,
+      "start_s": 0,
+      "seed_s": 369,
+      "start_c": 0,
+      "seed_c": 963,
+      "link_rule": 0,
+      "raw_bytes": 5744,
+      "pack_bytes": 19,
+      "decode_ok": true
+    },
+    {
+      "name": "cddg_dual_ring_64",
+      "n": 64,
+      "start_s": 0,
+      "seed_s": 369,
+      "start_c": 0,
+      "seed_c": 963,
+      "link_rule": 1,
+      "raw_bytes": 1024,
+      "pack_bytes": 19,
+      "decode_ok": true
+    }
+  ],
+  "all_decode_ok": true
+}
