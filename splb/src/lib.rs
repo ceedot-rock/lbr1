@@ -142,7 +142,17 @@ pub fn encode_window(data: &[u8], window: u32) -> Option<Vec<u8>> {
             }
         }
     }
-    consider_wraps(data, &mut best);
+    // Daily/fast: skip LZ/PAQ wrap bake (Kernel finder-bake) — wraps alone ≪50 MB/s.
+    let daily = matches!(
+        std::env::var("LBR1_PACK").ok().as_deref(),
+        Some("fast") | Some("daily") | Some("o1") | Some("ml4") | Some("ml4f") | Some("ml4exact")
+    ) || matches!(
+        std::env::var("LBR1_PARSE").ok().as_deref(),
+        Some("lazy") | Some("hc4")
+    );
+    if !daily {
+        consider_wraps(data, &mut best);
+    }
     best
 }
 
@@ -167,7 +177,14 @@ fn encode_lbr1_plain(data: &[u8], window: u32) -> Option<Vec<u8>> {
     let w = detect::window_for(data, window);
     let toks = parse::parse(data, w);
     let blob = frame::pack(&toks, data.len(), w as u32, data);
-    if blob.len() < data.len() && decode_lbr1(&blob).ok().as_deref() == Some(data) {
+    // Daily/fast: skip in-encode roundtrip (Kernel finder-bake). Caller/harness still DECODE_OK.
+    let skip_verify = matches!(
+        std::env::var("LBR1_PACK").ok().as_deref(),
+        Some("fast") | Some("daily") | Some("o1") | Some("ml4") | Some("ml4f") | Some("ml4exact")
+    );
+    if blob.len() < data.len()
+        && (skip_verify || decode_lbr1(&blob).ok().as_deref() == Some(data))
+    {
         Some(blob)
     } else {
         None
