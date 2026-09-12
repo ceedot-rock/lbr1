@@ -46,7 +46,7 @@ Paq mixers only when house ratio still > 0.35 and under their size cap.
 `lb champ` = LBR1 quality path (BW22 allowed except mozilla stays MATCH).  
 `lb best` = ZRW + struct_text + general + mixed + paq (capped) + PCC.  
 `lb aware` / house = those + AWARE.  
-gcr1 is not a seat. Puncture meld is not a seat.
+gcr1 and puncture meld are house internals. Seats are the genes in the table.
 
 ## Gene specs (pcc-0.13.0)
 
