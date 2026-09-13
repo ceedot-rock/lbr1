@@ -203,7 +203,14 @@ fn try_match(data: &[u8], class: detect::Class, window: u32, ml4: bool) -> Optio
     let w = detect::window_for_class(data.len(), class, window);
     let toks = parse::parse_class(data, w, class);
     let raffle = data.len() < 1_000_000;
-    let blob = pack_match(&toks, data, w as u32, ml4, raffle);
+    let mut blob = pack_match(&toks, data, w as u32, ml4, raffle);
+    // Champ packing (parse + LBR1 frame). DECODE_OK via decode_lbr1. mozilla lock.
+    let w2 = detect::window_for(data, window);
+    let toks2 = parse::parse(data, w2);
+    let champ = crate::frame::pack(&toks2, data.len(), w2 as u32, data);
+    if champ.len() < blob.len() && champ.len() < data.len() {
+        blob = champ;
+    }
     if blob.len() < data.len() {
         Some(blob)
     } else {
