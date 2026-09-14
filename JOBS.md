@@ -41,7 +41,7 @@ Router: classify → seat order → first DECODE_OK gene; then CDDG elide remain
 Text house order: **AWARE, struct_text, general**.  
 Binary: **general, AWARE** (skip AWARE on ooffice / files over `AWARE_CAP` 2,000,000).  
 Fill: ZRW via `lb encode`.  
-Paq mixers only when house ratio still > 0.35 and under their size cap.
+Paq mixers only when house ratio still > 0.31 and under their size cap.
 
 `lb champ` = LBR1 quality path (BW22 allowed except mozilla stays MATCH).  
 `lb best` = ZRW + struct_text + general + mixed + paq (capped) + PCC.  
@@ -95,7 +95,7 @@ Do not email Mahoney a second pulsar line (it did not beat 55,745,438). PCC is a
 ## Steal vs know
 
 | Steal | Know |
-|---|---|
+|---|---|---|
 | gzip inside OmniWave `general` | LBR1 / LZW1 / LZM1 in `general` |
 | brotli inside `struct_text` | pulsar + STR1 in `struct_text` |
 | xz as XZ1 | LZM1 (reimplementation) or Combined GC as itself |
