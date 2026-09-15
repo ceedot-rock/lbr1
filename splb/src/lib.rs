@@ -36,6 +36,8 @@ pub mod zmix;
 
 pub const VERSION: &str = "pcc-0.13.0";
 pub const MAGIC: &[u8; 4] = frame::MAGIC;
+/// After MATCH/BWT, mixers still run iff packed/raw > this.
+pub const OPEN_RATIO: f64 = 0.31;
 
 pub fn version() -> &'static str {
     VERSION
@@ -283,7 +285,7 @@ pub fn encode_best(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
     }
     let still_open = match &best {
         None => true,
-        Some((a, _)) => (a.len() as f64) / (data.len() as f64) > 0.31,
+        Some((a, _)) => (a.len() as f64) / (data.len() as f64) > OPEN_RATIO,
     };
     if still_open && data.len() <= zmix::HOUSE_MAX {
         if let Some(z) = zmix::encode(data) {
@@ -305,7 +307,7 @@ pub fn encode_best(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
     }
     let still_open = match &best {
         None => true,
-        Some((a, _)) => (a.len() as f64) / (data.len() as f64) > 0.31,
+        Some((a, _)) => (a.len() as f64) / (data.len() as f64) > OPEN_RATIO,
     };
     if still_open {
         if let Some(g) = try_gc_own(data) {
