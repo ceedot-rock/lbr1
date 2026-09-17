@@ -427,9 +427,11 @@ fn pick_one(data: &[u8], class: detect::Class, plan: &crate::autonoma::Plan) -> 
             }
         }
     }
+    // 0.31 gate: ZMIX/NNC/STR/LZ still get a turn after MATCH/BWT.
+    const OPEN: f64 = 0.31;
     let open = best
         .as_ref()
-        .map(|b| (b.blob.len() as f64) / (data.len() as f64) > 0.50)
+        .map(|b| (b.blob.len() as f64) / (data.len() as f64) > OPEN)
         .unwrap_or(true);
     if open {
         if let Some(z) = try_lz(data) {
