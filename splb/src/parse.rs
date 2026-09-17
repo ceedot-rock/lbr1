@@ -63,6 +63,20 @@ fn hash4_tag(a: u8, b: u8, c: u8, d: u8) -> (usize, u16) {
     (idx, tag)
 }
 
+/// Strengthened tag for `parse_lz4t3`: same bucket index as `hash4_tag`, but
+/// xor-mixes `data[pos+4]` when present so primary tag accepts reject more
+/// 4-byte hash collisions without a chain walk.
+#[inline]
+fn hash4_tag5(data: &[u8], pos: usize) -> (usize, u16) {
+    let (idx, tag0) = hash4_tag(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+    if pos + 4 < data.len() {
+        let mix = (data[pos + 4] as u16).wrapping_mul(0x9E37);
+        (idx, tag0 ^ mix)
+    } else {
+        (idx, tag0)
+    }
+}
+
 pub(crate) fn match_len(data: &[u8], i: usize, j: usize, cap: usize) -> usize {
     let max = cap.min(data.len() - i).min(data.len() - j);
     let mut n = 0;
@@ -251,12 +265,14 @@ pub fn parse_class(data: &[u8], window: usize, class: crate::detect::Class) -> V
     // Daily dial: LBR1_PARSE=lazy|hc4 forces hash-chain lazy finder even on large files.
     // Measure dial: LBR1_PARSE=lz4t|tag1 selects LZ4-class tagged/single-slot find
     // (no chain table). LBR1_PARSE=lz4t2|tag1x = lz4t + ≤1 alternate on short tag hits.
+    // LBR1_PARSE=lz4t3|tag1s = better N/insert/tag sibling (still ≤1 alternate).
     // Default unset keeps max/PCC BT4 path. Does not change bitstream.
     // Dial A ship defaults (hc4 / W=1MiB / CHAIN=8 / HASH=17) stay unchanged.
     match std::env::var("LBR1_PARSE").ok().as_deref() {
         Some("lazy") | Some("hc4") => return parse_lazy(data, window),
         Some("lz4t") | Some("tag1") => return parse_lz4t(data, window),
         Some("lz4t2") | Some("tag1x") => return parse_lz4t2(data, window),
+        Some("lz4t3") | Some("tag1s") => return parse_lz4t3(data, window),
         _ => {}
     }
     // Full DP tables are O(n) and OOM on mozilla in 2 GB. Stream instead.
@@ -891,6 +907,174 @@ pub fn parse_lz4t2(data: &[u8], window: usize) -> Vec<Tok> {
 }
 
 
+/// Measure-only find class: lz4t2 shape with **better N / insert / tag**.
+///
+/// Select with `LBR1_PARSE=lz4t3` (alias `tag1s`). Sibling of `parse_lz4t2` —
+/// leaves lz4t / lz4t2 / lazy / Dial A (`hc4`) untouched. No chain walk, no
+/// CHAIN=8, no Dial C knobs, still **≤1** alternate.
+///
+/// Shape (Theory GREENLIGHT after #16 lz4t2 RED — claw remaining ~424k):
+/// 1. **Stronger tag** — `hash4_tag5` (byte4 xor-mix) so primary accepts cut more
+///    false 4-byte collisions without loading candidates.
+/// 2. **Smarter insert** — when overwriting head, prefer keeping a **better prior**
+///    in `prev`: near-neighbor match-run overwrites do not clobber an existing
+///    deep prev (`NEAR=32`); empty prev still takes the outgoing head.
+/// 3. **Retuned SHORT_N=24** (lz4t2 used 16) — allow the single alternate on
+///    medium-short primary tag hits to claw match quality; long hits still skip.
+/// 4. Primary tag miss → no alternate (false-candidate tax stays cut).
+///
+/// Size vs zstd-9 / Dial A is Kernel bake territory — measure-only, not ship.
+pub fn parse_lz4t3(data: &[u8], window: usize) -> Vec<Tok> {
+    // Env (measure dial; Dial A hc4 + lz4t + lz4t2 paths untouched):
+    //   LBR1_PARSE=lz4t3|tag1s  — select this finder
+    //   LBR1_WINDOW=…           — via detect::window_for / env (Dial A bake: 1048576)
+    //   LBR1_LAZY=0             — greedy (default); LBR1_LAZY=1 enables +1 lookahead
+    // No LBR1_CHAIN: primary is single-slot; alternate is fixed ≤1 prev probe.
+    // SHORT_N=24: retune from lz4t2's 16 — document choice for measure bake.
+    const SHORT_N: u32 = 24;
+    // Near-neighbor threshold for smarter insert (prefer keeping better prior).
+    const NEAR: usize = 32;
+    let n = data.len();
+    let win = window.max(256).next_power_of_two();
+    let do_lazy = std::env::var("LBR1_LAZY")
+        .ok()
+        .map(|s| s != "0" && s != "false" && s != "off")
+        .unwrap_or(false);
+    let mut head = vec![-1i32; HASH_SIZE];
+    let mut tags = vec![0u16; HASH_SIZE];
+    // 1-deep overwrite victim (not a chain): at most one alternate probe.
+    let mut prev = vec![-1i32; HASH_SIZE];
+    let mut prev_tags = vec![0u16; HASH_SIZE];
+    let mut scout_head = vec![-1i32; SCOUT_SIZE];
+    let use_scouts = crate::detect::scouts_wanted(data);
+    let stride = crate::detect::scout_stride(data).max(1);
+    let mut toks = Vec::new();
+    let mut i = 0usize;
+
+    let insert = |head: &mut [i32],
+                  tags: &mut [u16],
+                  prev: &mut [i32],
+                  prev_tags: &mut [u16],
+                  scout_head: &mut [i32],
+                  pos: usize| {
+        if pos + 3 >= n {
+            return;
+        }
+        let (h, tag) = hash4_tag5(data, pos);
+        let old = head[h];
+        // Smarter insert: prefer keeping better prior in prev.
+        // Dense match-run inserts would otherwise replace a deep prev with a near
+        // twin of head; skip near-neighbor clobber when prev is already set.
+        if old >= 0 && (old as usize) != pos {
+            let old_u = old as usize;
+            let pp = prev[h];
+            let near = pos.saturating_sub(old_u) <= NEAR;
+            if pp < 0 {
+                prev[h] = old;
+                prev_tags[h] = tags[h];
+            } else if !near {
+                // Far overwrite: take outgoing head as the sole alternate.
+                prev[h] = old;
+                prev_tags[h] = tags[h];
+            }
+            // else: near overwrite + prev occupied → keep existing better prior.
+        }
+        head[h] = pos as i32;
+        tags[h] = tag;
+        if use_scouts && pos % stride == 0 && pos + 8 <= n {
+            scout_head[hash8(data, pos)] = pos as i32;
+        }
+    };
+
+    let find = |head: &[i32],
+                tags: &[u16],
+                prev: &[i32],
+                prev_tags: &[u16],
+                scout_head: &[i32],
+                pos: usize|
+     -> (u32, u32) {
+        if pos + MIN_MATCH > n {
+            return (0, 0);
+        }
+        let floor = if pos > win { (pos - win) as i32 } else { -1 };
+        let mut best_l = 0u32;
+        let mut best_d = 0u32;
+        let (h, tag) = hash4_tag5(data, pos);
+        let p = head[h];
+        let mut primary_tag_hit = false;
+        if p > floor && (p as usize) < pos && tags[h] == tag {
+            primary_tag_hit = true;
+            consider(&mut best_l, &mut best_d, data, pos, p as usize);
+        }
+        // ≤1 alternate: only on short/medium primary tag hits (len < SHORT_N=24).
+        // Not a chain walk — single prev overwrite victim with its own tag.
+        if primary_tag_hit && best_l < SHORT_N {
+            let pp = prev[h];
+            if pp > floor && (pp as usize) < pos && prev_tags[h] == tag {
+                consider(&mut best_l, &mut best_d, data, pos, pp as usize);
+            }
+        }
+        if use_scouts && pos + 8 <= n && best_l < 32 {
+            let sp = scout_head[hash8(data, pos)];
+            if sp > floor && (sp as usize) < pos {
+                consider(&mut best_l, &mut best_d, data, pos, sp as usize);
+            }
+        }
+        (best_d, best_l)
+    };
+
+    while i < n {
+        let (d0, l0) = find(&head, &tags, &prev, &prev_tags, &scout_head, i);
+        if l0 >= MIN_MATCH as u32 {
+            if do_lazy {
+                let (d1, l1) = find(&head, &tags, &prev, &prev_tags, &scout_head, i + 1);
+                let take_lazy = l1 >= MIN_MATCH as u32
+                    && bits_saved(l1, d1.max(1)) > bits_saved(l0, d0.max(1)) + 8;
+                if take_lazy {
+                    toks.push(Tok::Lit(data[i]));
+                    insert(
+                        &mut head,
+                        &mut tags,
+                        &mut prev,
+                        &mut prev_tags,
+                        &mut scout_head,
+                        i,
+                    );
+                    i += 1;
+                    continue;
+                }
+            }
+            toks.push(Tok::Match { dist: d0, len: l0 });
+            let end = i + l0 as usize;
+            let mut p = i;
+            while p < end {
+                insert(
+                    &mut head,
+                    &mut tags,
+                    &mut prev,
+                    &mut prev_tags,
+                    &mut scout_head,
+                    p,
+                );
+                p += if l0 >= 64 { 4 } else { 1 };
+            }
+            i = end;
+        } else {
+            toks.push(Tok::Lit(data[i]));
+            insert(
+                &mut head,
+                &mut tags,
+                &mut prev,
+                &mut prev_tags,
+                &mut scout_head,
+                i,
+            );
+            i += 1;
+        }
+    }
+    toks
+}
+
 
 pub fn expand(toks: &[Tok]) -> Result<Vec<u8>, &'static str> {
     let mut out = Vec::new();
@@ -993,6 +1177,19 @@ mod tests {
             s.extend_from_slice(&[0u8; 32]);
         }
         let t = parse_lz4t2(&s, DEFAULT_WINDOW);
+        assert_eq!(expand(&t).unwrap(), s);
+        assert!(t.iter().any(|x| matches!(x, Tok::Match { .. })));
+    }
+
+    #[test]
+    fn lz4t3_roundtrip_motif() {
+        let mut s = Vec::new();
+        let m = b"QWERTYUIOPASDFGH";
+        for _ in 0..200 {
+            s.extend_from_slice(m);
+            s.extend_from_slice(&[0u8; 32]);
+        }
+        let t = parse_lz4t3(&s, DEFAULT_WINDOW);
         assert_eq!(expand(&t).unwrap(), s);
         assert!(t.iter().any(|x| matches!(x, Tok::Match { .. })));
     }
