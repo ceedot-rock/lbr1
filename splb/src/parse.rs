@@ -245,20 +245,45 @@ pub fn parse(data: &[u8], window: usize) -> Vec<Tok> {
     parse_class(data, window, crate::detect::classify(data))
 }
 
+fn hybrid_find_selected() -> bool {
+    // Scout Fast F1 primary dial (Theory 2026-09-18). Prefer FIND/HYBRID over PARSE.
+    // Closed lz4t N/tag measure line stays closed — this is Hybrid find, not N retune.
+    if matches!(
+        std::env::var("LBR1_HYBRID").ok().as_deref(),
+        Some("1") | Some("true") | Some("on") | Some("yes")
+    ) {
+        return true;
+    }
+    matches!(
+        std::env::var("LBR1_FIND")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "hybrid" | "f1" | "fast-hybrid"
+    )
+}
+
 pub fn parse_class(data: &[u8], window: usize, class: crate::detect::Class) -> Vec<Tok> {
     let n = data.len();
     if n == 0 { return Vec::new(); }
+    // Scout Fast F1 Hybrid find (measure): LBR1_FIND=hybrid | LBR1_HYBRID=1
+    // wins over LBR1_PARSE so Dial A pack env (PARSE=hc4 PACK=ml4 …) can stay set.
+    // Fast tagged primary + selective Dial A–quality recovery on coverage holes only.
+    // Legacy PARSE=lz4t-hybrid|tag1h still works (compat); do not revive N/insert dials.
+    if hybrid_find_selected() {
+        return parse_lz4t_hybrid(data, window);
+    }
     // Daily dial: LBR1_PARSE=lazy|hc4 forces hash-chain lazy finder even on large files.
     // Measure dial: LBR1_PARSE=lz4t|tag1 selects LZ4-class tagged/single-slot find
     // (no chain table). LBR1_PARSE=lz4t2|tag1x = lz4t + ≤1 alternate on short tag hits.
-    // LBR1_PARSE=lz4t-hybrid|tag1h = lz4t2 primary + selective Dial A recovery (≤3).
+    // LBR1_PARSE=lz4t-hybrid|tag1h = legacy alias for Hybrid find (prefer FIND=hybrid).
     // Default unset keeps max/PCC BT4 path. Does not change bitstream.
     // Dial A ship defaults (hc4 / W=1MiB / CHAIN=8 / HASH=17) stay unchanged.
     match std::env::var("LBR1_PARSE").ok().as_deref() {
         Some("lazy") | Some("hc4") => return parse_lazy(data, window),
         Some("lz4t") | Some("tag1") => return parse_lz4t(data, window),
         Some("lz4t2") | Some("tag1x") => return parse_lz4t2(data, window),
-        Some("lz4t-hybrid") | Some("tag1h") => return parse_lz4t_hybrid(data, window),
+        Some("lz4t-hybrid") | Some("tag1h") | Some("hybrid") => return parse_lz4t_hybrid(data, window),
         _ => {}
     }
     // Full DP tables are O(n) and OOM on mozilla in 2 GB. Stream instead.
@@ -976,35 +1001,43 @@ pub fn parse_lz4t2(data: &[u8], window: usize) -> Vec<Tok> {
 }
 
 
-/// Measure-only find class: **lz4t2 primary** + **selective Dial A recovery**.
+/// Scout Fast F1 **Hybrid find** (measure-only): fast tagged primary + selective
+/// Dial A–quality recovery on coverage holes. Not a full hc4/CHAIN=8 find wall.
 ///
-/// Select with `LBR1_PARSE=lz4t-hybrid` (alias `tag1h`). Sibling of `parse_lz4t2`
-/// — leaves Dial A (`parse_lazy` / `hc4`), `parse_lz4t`, and `parse_lz4t2`
-/// untouched. Size claw from **lz4t2 baseline** (#16), not lz4t3.
+/// **Primary dial (Theory 2026-09-18):** `LBR1_FIND=hybrid` or `LBR1_HYBRID=1`
+/// (aliases `FIND=f1|fast-hybrid`). Works with Dial A pack env left intact
+/// (`PARSE=hc4 PACK=ml4 WINDOW=1MiB …`) because FIND wins over PARSE.
 ///
-/// Shape (Theory hybrid class after #15/#16/#17 RED on size):
-/// 1. **Primary** — same tagged/single-slot as lz4t2 (`hash4_tag` + ≤1 prev
-///    alternate on short tag hits, `SHORT_N=16`) for find≥50 / probes≪5.
-/// 2. **Selective recovery** — Dial A–quality hc4 chain peek **only** where
-///    primary coverage dies (tag miss / short garbage / no usable `MIN_MATCH`).
-///    Not a full `CHAIN=8` walk on every find.
-/// 3. **Probe hard-cap** — recovery ≤ `RECOVERY_STEPS=3` chain visits; absolute
-///    `PROBE_HARD_CAP=4` considers/find so avg stays ≪5 (must not climb toward
-///    Dial A ~5).
+/// Legacy: `LBR1_PARSE=lz4t-hybrid|tag1h|hybrid` — compat only; lz4t N/insert/tag
+/// retune line stays **closed**.
 ///
-/// Size vs zstd-9 / Dial A is Kernel bake territory — measure-only, not ship.
+/// Shape:
+/// 1. **Primary** — tagged/single-slot (lz4t-class *speed*, fixed SHORT_N=16,
+///    ≤1 alternate on short tag hits) for find≥50 / mean probes≪5.
+/// 2. **Selective recovery** — Dial A–quality chain peek **only** where primary
+///    coverage dies (tag miss / short garbage / no usable `MIN_MATCH`).
+/// 3. **Probe hard-cap** — recovery ≤ RECOVERY_STEPS chain visits; absolute
+///    PROBE_HARD_CAP considers/find so mean stays ≪5 (must not restore Dial A find wall).
+///
+/// Optional knobs (defaults match sealed Hybrid shape; not N-dial spam):
+///   LBR1_HYBRID_RECOVERY=0..8   (default 3) — recovery chain steps on holes only
+///   LBR1_HYBRID_PROBE_CAP=1..8  (default 4) — absolute considers/find hard-cap
+///
+/// Size/speed kill bars are Kernel clock territory — measure-only, not ship.
 pub fn parse_lz4t_hybrid(data: &[u8], window: usize) -> Vec<Tok> {
-    // Env (measure dial; Dial A hc4 + lz4t / lz4t2 paths untouched):
-    //   LBR1_PARSE=lz4t-hybrid|tag1h  — select this finder
+    // Env (measure dial; Dial A hc4 ship path untouched when FIND unset):
+    //   LBR1_FIND=hybrid | LBR1_HYBRID=1  — select this finder (preferred)
+    //   LBR1_PARSE=lz4t-hybrid|tag1h|hybrid — legacy select
     //   LBR1_WINDOW=…                 — via detect::window_for / env (Dial A bake: 1048576)
     //   LBR1_LAZY=0                   — greedy (default); LBR1_LAZY=1 enables +1 lookahead
-    // No LBR1_CHAIN: recovery budget is fixed (RECOVERY_STEPS), not Dial A CHAIN=8.
-    // Short-hit threshold N=16: same as lz4t2 primary.
+    //   LBR1_HYBRID_RECOVERY / LBR1_HYBRID_PROBE_CAP — see doc above
+    // No LBR1_CHAIN: recovery budget is Hybrid knobs, not Dial A CHAIN=8 default walk.
+    // SHORT_N=16 fixed (closed N-tweak line — do not retune via env).
     const SHORT_N: u32 = 16;
     // Tiny Dial A-style recovery budget (not CHAIN=8).
-    const RECOVERY_STEPS: usize = 3;
+    let recovery_steps = env_usize("LBR1_HYBRID_RECOVERY", 3, 0, 8);
     // Absolute consider hard-cap per find position (primary + alt + scout + recovery).
-    const PROBE_HARD_CAP: usize = 4;
+    let probe_hard_cap = env_usize("LBR1_HYBRID_PROBE_CAP", 4, 1, 8);
     let n = data.len();
     let win = window.max(256).next_power_of_two();
     let mask = win - 1;
@@ -1074,13 +1107,13 @@ pub fn parse_lz4t_hybrid(data: &[u8], window: usize) -> Vec<Tok> {
         if p > floor && (p as usize) < pos && tags[h] == tag {
             primary_tag_hit = true;
             primary_j = Some(p as usize);
-            if probes < PROBE_HARD_CAP {
+            if probes < probe_hard_cap {
                 consider(&mut best_l, &mut best_d, data, pos, p as usize);
                 probes += 1;
             }
         }
         // ≤1 alternate: only on short primary tag hits (len < SHORT_N=16).
-        if primary_tag_hit && best_l < SHORT_N && probes < PROBE_HARD_CAP {
+        if primary_tag_hit && best_l < SHORT_N && probes < probe_hard_cap {
             let pp = prev[h];
             if pp > floor && (pp as usize) < pos && prev_tags[h] == tag {
                 alt_j = Some(pp as usize);
@@ -1088,7 +1121,7 @@ pub fn parse_lz4t_hybrid(data: &[u8], window: usize) -> Vec<Tok> {
                 probes += 1;
             }
         }
-        if use_scouts && pos + 8 <= n && best_l < 32 && probes < PROBE_HARD_CAP {
+        if use_scouts && pos + 8 <= n && best_l < 32 && probes < probe_hard_cap {
             let sp = scout_head[hash8(data, pos)];
             if sp > floor && (sp as usize) < pos {
                 consider(&mut best_l, &mut best_d, data, pos, sp as usize);
@@ -1097,7 +1130,7 @@ pub fn parse_lz4t_hybrid(data: &[u8], window: usize) -> Vec<Tok> {
         }
         // Selective recovery: Dial A–quality chain peek ONLY when primary died
         // (tag miss / short garbage / no usable MIN_MATCH). Hard-capped.
-        if best_l < MIN_MATCH as u32 && probes < PROBE_HARD_CAP {
+        if best_l < MIN_MATCH as u32 && probes < probe_hard_cap {
             let mut rp = head[h];
             // If primary already considered head, start one link deeper.
             if primary_tag_hit {
@@ -1106,7 +1139,7 @@ pub fn parse_lz4t_hybrid(data: &[u8], window: usize) -> Vec<Tok> {
                 }
             }
             let mut steps = 0usize;
-            while rp > floor && steps < RECOVERY_STEPS && probes < PROBE_HARD_CAP {
+            while rp > floor && steps < recovery_steps && probes < probe_hard_cap {
                 let j = rp as usize;
                 if j < pos && Some(j) != primary_j && Some(j) != alt_j {
                     consider(&mut best_l, &mut best_d, data, pos, j);
@@ -1294,5 +1327,19 @@ mod tests {
         let t = parse_lz4t_hybrid(&s, DEFAULT_WINDOW);
         assert_eq!(expand(&t).unwrap(), s);
         assert!(t.iter().any(|x| matches!(x, Tok::Match { .. })));
+    }
+
+    #[test]
+    fn hybrid_find_env_selected() {
+        // Ensure helper recognizes Scout Fast F1 dial names.
+        std::env::remove_var("LBR1_HYBRID");
+        std::env::remove_var("LBR1_FIND");
+        assert!(!hybrid_find_selected());
+        std::env::set_var("LBR1_FIND", "hybrid");
+        assert!(hybrid_find_selected());
+        std::env::remove_var("LBR1_FIND");
+        std::env::set_var("LBR1_HYBRID", "1");
+        assert!(hybrid_find_selected());
+        std::env::remove_var("LBR1_HYBRID");
     }
 }
