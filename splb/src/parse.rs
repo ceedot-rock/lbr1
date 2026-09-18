@@ -245,16 +245,45 @@ pub fn parse(data: &[u8], window: usize) -> Vec<Tok> {
     parse_class(data, window, crate::detect::classify(data))
 }
 
+fn hybrid_find_selected() -> bool {
+    // Scout Fast F1 primary dial (Theory 2026-09-18). Prefer FIND/HYBRID over PARSE.
+    // Closed lz4t N/tag measure line stays closed — this is Hybrid find, not N retune.
+    if matches!(
+        std::env::var("LBR1_HYBRID").ok().as_deref(),
+        Some("1") | Some("true") | Some("on") | Some("yes")
+    ) {
+        return true;
+    }
+    matches!(
+        std::env::var("LBR1_FIND")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "hybrid" | "f1" | "fast-hybrid"
+    )
+}
+
 pub fn parse_class(data: &[u8], window: usize, class: crate::detect::Class) -> Vec<Tok> {
     let n = data.len();
     if n == 0 { return Vec::new(); }
+    // Scout Fast F1 Hybrid find (measure): LBR1_FIND=hybrid | LBR1_HYBRID=1
+    // wins over LBR1_PARSE so Dial A pack env (PARSE=hc4 PACK=ml4 …) can stay set.
+    // Fast tagged primary + selective Dial A–quality recovery on coverage holes only.
+    // Legacy PARSE=lz4t-hybrid|tag1h still works (compat); do not revive N/insert dials.
+    if hybrid_find_selected() {
+        return parse_lz4t_hybrid(data, window);
+    }
     // Daily dial: LBR1_PARSE=lazy|hc4 forces hash-chain lazy finder even on large files.
     // Measure dial: LBR1_PARSE=lz4t|tag1 selects LZ4-class tagged/single-slot find
-    // (no chain table). Default unset keeps max/PCC BT4 path. Does not change bitstream.
+    // (no chain table). LBR1_PARSE=lz4t2|tag1x = lz4t + ≤1 alternate on short tag hits.
+    // LBR1_PARSE=lz4t-hybrid|tag1h = legacy alias for Hybrid find (prefer FIND=hybrid).
+    // Default unset keeps max/PCC BT4 path. Does not change bitstream.
     // Dial A ship defaults (hc4 / W=1MiB / CHAIN=8 / HASH=17) stay unchanged.
     match std::env::var("LBR1_PARSE").ok().as_deref() {
         Some("lazy") | Some("hc4") => return parse_lazy(data, window),
         Some("lz4t") | Some("tag1") => return parse_lz4t(data, window),
+        Some("lz4t2") | Some("tag1x") => return parse_lz4t2(data, window),
+        Some("lz4t-hybrid") | Some("tag1h") | Some("hybrid") => return parse_lz4t_hybrid(data, window),
         _ => {}
     }
     // Full DP tables are O(n) and OOM on mozilla in 2 GB. Stream instead.
@@ -819,6 +848,368 @@ pub fn parse_lz4t(data: &[u8], window: usize) -> Vec<Tok> {
     toks
 }
 
+/// Measure-only find class: lz4t primary + **≤1 alternate** on short tag hits.
+///
+/// Select with `LBR1_PARSE=lz4t2` (alias `tag1x`). Sibling of `parse_lz4t` —
+/// leaves lz4t / lazy / Dial A (`hc4`) untouched. No chain walk, no CHAIN=8,
+/// no Dial C knobs.
+///
+/// Shape (Theory GREENLIGHT after #15 RED):
+/// 1. Primary path stays tagged/single-slot (lz4t speed idea that cleared find~67).
+/// 2. On primary **tag hit** with match `len < N` (N=**16**), probe **at most one**
+///    alternate: the previous overwrite victim for that bucket (1-deep `prev` +
+///    `prev_tags`). Not a chain; avg probes must stay ≪ ~5.
+/// 3. Long primary hits (`len >= 16`) skip the alternate (keep speed).
+/// 4. Primary tag miss → no alternate (false-candidate tax stays cut).
+///
+/// Size vs zstd-9 / Dial A is Kernel bake territory — measure-only, not ship.
+pub fn parse_lz4t2(data: &[u8], window: usize) -> Vec<Tok> {
+    // Env (measure dial; Dial A hc4 + lz4t paths untouched):
+    //   LBR1_PARSE=lz4t2|tag1x  — select this finder
+    //   LBR1_WINDOW=…           — via detect::window_for / env (Dial A bake: 1048576)
+    //   LBR1_LAZY=0             — greedy (default); LBR1_LAZY=1 enables +1 lookahead
+    // No LBR1_CHAIN: primary is single-slot; alternate is fixed ≤1 prev probe.
+    // Short-hit threshold N=16: only tag hits with len < 16 take the alternate.
+    const SHORT_N: u32 = 16;
+    let n = data.len();
+    let win = window.max(256).next_power_of_two();
+    let do_lazy = std::env::var("LBR1_LAZY")
+        .ok()
+        .map(|s| s != "0" && s != "false" && s != "off")
+        .unwrap_or(false);
+    let mut head = vec![-1i32; HASH_SIZE];
+    let mut tags = vec![0u16; HASH_SIZE];
+    // 1-deep overwrite victim (not a chain): at most one alternate probe.
+    let mut prev = vec![-1i32; HASH_SIZE];
+    let mut prev_tags = vec![0u16; HASH_SIZE];
+    let mut scout_head = vec![-1i32; SCOUT_SIZE];
+    let use_scouts = crate::detect::scouts_wanted(data);
+    let stride = crate::detect::scout_stride(data).max(1);
+    let mut toks = Vec::new();
+    let mut i = 0usize;
+
+    let insert = |head: &mut [i32],
+                  tags: &mut [u16],
+                  prev: &mut [i32],
+                  prev_tags: &mut [u16],
+                  scout_head: &mut [i32],
+                  pos: usize| {
+        if pos + 3 >= n {
+            return;
+        }
+        let (h, tag) = hash4_tag(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+        let old = head[h];
+        // Keep prior head as the sole alternate when overwriting a different slot.
+        if old >= 0 && (old as usize) != pos {
+            prev[h] = old;
+            prev_tags[h] = tags[h];
+        }
+        head[h] = pos as i32;
+        tags[h] = tag;
+        if use_scouts && pos % stride == 0 && pos + 8 <= n {
+            scout_head[hash8(data, pos)] = pos as i32;
+        }
+    };
+
+    let find = |head: &[i32],
+                tags: &[u16],
+                prev: &[i32],
+                prev_tags: &[u16],
+                scout_head: &[i32],
+                pos: usize|
+     -> (u32, u32) {
+        if pos + MIN_MATCH > n {
+            return (0, 0);
+        }
+        let floor = if pos > win { (pos - win) as i32 } else { -1 };
+        let mut best_l = 0u32;
+        let mut best_d = 0u32;
+        let (h, tag) = hash4_tag(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+        let p = head[h];
+        let mut primary_tag_hit = false;
+        if p > floor && (p as usize) < pos && tags[h] == tag {
+            primary_tag_hit = true;
+            consider(&mut best_l, &mut best_d, data, pos, p as usize);
+        }
+        // ≤1 alternate: only on short primary tag hits (len < SHORT_N=16).
+        // Not a chain walk — single prev overwrite victim with its own tag.
+        if primary_tag_hit && best_l < SHORT_N {
+            let pp = prev[h];
+            if pp > floor && (pp as usize) < pos && prev_tags[h] == tag {
+                consider(&mut best_l, &mut best_d, data, pos, pp as usize);
+            }
+        }
+        if use_scouts && pos + 8 <= n && best_l < 32 {
+            let sp = scout_head[hash8(data, pos)];
+            if sp > floor && (sp as usize) < pos {
+                consider(&mut best_l, &mut best_d, data, pos, sp as usize);
+            }
+        }
+        (best_d, best_l)
+    };
+
+    while i < n {
+        let (d0, l0) = find(&head, &tags, &prev, &prev_tags, &scout_head, i);
+        if l0 >= MIN_MATCH as u32 {
+            if do_lazy {
+                let (d1, l1) = find(&head, &tags, &prev, &prev_tags, &scout_head, i + 1);
+                let take_lazy = l1 >= MIN_MATCH as u32
+                    && bits_saved(l1, d1.max(1)) > bits_saved(l0, d0.max(1)) + 8;
+                if take_lazy {
+                    toks.push(Tok::Lit(data[i]));
+                    insert(
+                        &mut head,
+                        &mut tags,
+                        &mut prev,
+                        &mut prev_tags,
+                        &mut scout_head,
+                        i,
+                    );
+                    i += 1;
+                    continue;
+                }
+            }
+            toks.push(Tok::Match { dist: d0, len: l0 });
+            let end = i + l0 as usize;
+            let mut p = i;
+            while p < end {
+                insert(
+                    &mut head,
+                    &mut tags,
+                    &mut prev,
+                    &mut prev_tags,
+                    &mut scout_head,
+                    p,
+                );
+                p += if l0 >= 64 { 4 } else { 1 };
+            }
+            i = end;
+        } else {
+            toks.push(Tok::Lit(data[i]));
+            insert(
+                &mut head,
+                &mut tags,
+                &mut prev,
+                &mut prev_tags,
+                &mut scout_head,
+                i,
+            );
+            i += 1;
+        }
+    }
+    toks
+}
+
+
+/// Scout Fast F1 **Hybrid find** (measure-only): fast tagged primary + selective
+/// Dial A–quality recovery on coverage holes. Not a full hc4/CHAIN=8 find wall.
+///
+/// **Primary dial (Theory 2026-09-18):** `LBR1_FIND=hybrid` or `LBR1_HYBRID=1`
+/// (aliases `FIND=f1|fast-hybrid`). Works with Dial A pack env left intact
+/// (`PARSE=hc4 PACK=ml4 WINDOW=1MiB …`) because FIND wins over PARSE.
+///
+/// Legacy: `LBR1_PARSE=lz4t-hybrid|tag1h|hybrid` — compat only; lz4t N/insert/tag
+/// retune line stays **closed**.
+///
+/// Shape:
+/// 1. **Primary** — tagged/single-slot (lz4t-class *speed*, fixed SHORT_N=16,
+///    ≤1 alternate on short tag hits) for find≥50 / mean probes≪5.
+/// 2. **Selective recovery** — Dial A–quality chain peek **only** where primary
+///    coverage dies (tag miss / short garbage / no usable `MIN_MATCH`).
+/// 3. **Probe hard-cap** — recovery ≤ RECOVERY_STEPS chain visits; absolute
+///    PROBE_HARD_CAP considers/find so mean stays ≪5 (must not restore Dial A find wall).
+///
+/// Optional knobs (defaults match sealed Hybrid shape; not N-dial spam):
+///   LBR1_HYBRID_RECOVERY=0..8   (default 3) — recovery chain steps on holes only
+///   LBR1_HYBRID_PROBE_CAP=1..8  (default 4) — absolute considers/find hard-cap
+///
+/// Size/speed kill bars are Kernel clock territory — measure-only, not ship.
+pub fn parse_lz4t_hybrid(data: &[u8], window: usize) -> Vec<Tok> {
+    // Env (measure dial; Dial A hc4 ship path untouched when FIND unset):
+    //   LBR1_FIND=hybrid | LBR1_HYBRID=1  — select this finder (preferred)
+    //   LBR1_PARSE=lz4t-hybrid|tag1h|hybrid — legacy select
+    //   LBR1_WINDOW=…                 — via detect::window_for / env (Dial A bake: 1048576)
+    //   LBR1_LAZY=0                   — greedy (default); LBR1_LAZY=1 enables +1 lookahead
+    //   LBR1_HYBRID_RECOVERY / LBR1_HYBRID_PROBE_CAP — see doc above
+    // No LBR1_CHAIN: recovery budget is Hybrid knobs, not Dial A CHAIN=8 default walk.
+    // SHORT_N=16 fixed (closed N-tweak line — do not retune via env).
+    const SHORT_N: u32 = 16;
+    // Tiny Dial A-style recovery budget (not CHAIN=8).
+    let recovery_steps = env_usize("LBR1_HYBRID_RECOVERY", 3, 0, 8);
+    // Absolute consider hard-cap per find position (primary + alt + scout + recovery).
+    let probe_hard_cap = env_usize("LBR1_HYBRID_PROBE_CAP", 4, 1, 8);
+    let n = data.len();
+    let win = window.max(256).next_power_of_two();
+    let mask = win - 1;
+    let do_lazy = std::env::var("LBR1_LAZY")
+        .ok()
+        .map(|s| s != "0" && s != "false" && s != "off")
+        .unwrap_or(false);
+    let mut head = vec![-1i32; HASH_SIZE];
+    let mut tags = vec![0u16; HASH_SIZE];
+    // 1-deep overwrite victim for lz4t2-style alternate (not a full chain).
+    let mut prev = vec![-1i32; HASH_SIZE];
+    let mut prev_tags = vec![0u16; HASH_SIZE];
+    // Windowed hc4 chain — used only on selective recovery (reuse Dial A shape).
+    let mut chain = vec![-1i32; win];
+    let mut scout_head = vec![-1i32; SCOUT_SIZE];
+    let use_scouts = crate::detect::scouts_wanted(data);
+    let stride = crate::detect::scout_stride(data).max(1);
+    let mut toks = Vec::new();
+    let mut i = 0usize;
+
+    let insert = |head: &mut [i32],
+                  tags: &mut [u16],
+                  prev: &mut [i32],
+                  prev_tags: &mut [u16],
+                  chain: &mut [i32],
+                  scout_head: &mut [i32],
+                  pos: usize| {
+        if pos + 3 >= n {
+            return;
+        }
+        let (h, tag) = hash4_tag(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+        let old = head[h];
+        // Dial A–style chain link for selective recovery walks.
+        chain[pos & mask] = old;
+        // Keep prior head as the sole alternate when overwriting a different slot.
+        if old >= 0 && (old as usize) != pos {
+            prev[h] = old;
+            prev_tags[h] = tags[h];
+        }
+        head[h] = pos as i32;
+        tags[h] = tag;
+        if use_scouts && pos % stride == 0 && pos + 8 <= n {
+            scout_head[hash8(data, pos)] = pos as i32;
+        }
+    };
+
+    let find = |head: &[i32],
+                tags: &[u16],
+                prev: &[i32],
+                prev_tags: &[u16],
+                chain: &[i32],
+                scout_head: &[i32],
+                pos: usize|
+     -> (u32, u32) {
+        if pos + MIN_MATCH > n {
+            return (0, 0);
+        }
+        let floor = if pos > win { (pos - win) as i32 } else { -1 };
+        let mut best_l = 0u32;
+        let mut best_d = 0u32;
+        let mut probes = 0usize;
+        let (h, tag) = hash4_tag(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+        let p = head[h];
+        let mut primary_tag_hit = false;
+        let mut primary_j = None;
+        let mut alt_j = None;
+        if p > floor && (p as usize) < pos && tags[h] == tag {
+            primary_tag_hit = true;
+            primary_j = Some(p as usize);
+            if probes < probe_hard_cap {
+                consider(&mut best_l, &mut best_d, data, pos, p as usize);
+                probes += 1;
+            }
+        }
+        // ≤1 alternate: only on short primary tag hits (len < SHORT_N=16).
+        if primary_tag_hit && best_l < SHORT_N && probes < probe_hard_cap {
+            let pp = prev[h];
+            if pp > floor && (pp as usize) < pos && prev_tags[h] == tag {
+                alt_j = Some(pp as usize);
+                consider(&mut best_l, &mut best_d, data, pos, pp as usize);
+                probes += 1;
+            }
+        }
+        if use_scouts && pos + 8 <= n && best_l < 32 && probes < probe_hard_cap {
+            let sp = scout_head[hash8(data, pos)];
+            if sp > floor && (sp as usize) < pos {
+                consider(&mut best_l, &mut best_d, data, pos, sp as usize);
+                probes += 1;
+            }
+        }
+        // Selective recovery: Dial A–quality chain peek ONLY when primary died
+        // (tag miss / short garbage / no usable MIN_MATCH). Hard-capped.
+        if best_l < MIN_MATCH as u32 && probes < probe_hard_cap {
+            let mut rp = head[h];
+            // If primary already considered head, start one link deeper.
+            if primary_tag_hit {
+                if rp > floor {
+                    rp = chain[(rp as usize) & mask];
+                }
+            }
+            let mut steps = 0usize;
+            while rp > floor && steps < recovery_steps && probes < probe_hard_cap {
+                let j = rp as usize;
+                if j < pos && Some(j) != primary_j && Some(j) != alt_j {
+                    consider(&mut best_l, &mut best_d, data, pos, j);
+                    probes += 1;
+                    if best_l as usize == MAX_MATCH {
+                        break;
+                    }
+                }
+                rp = chain[j & mask];
+                steps += 1;
+            }
+        }
+        (best_d, best_l)
+    };
+
+    while i < n {
+        let (d0, l0) = find(&head, &tags, &prev, &prev_tags, &chain, &scout_head, i);
+        if l0 >= MIN_MATCH as u32 {
+            if do_lazy {
+                let (d1, l1) = find(&head, &tags, &prev, &prev_tags, &chain, &scout_head, i + 1);
+                let take_lazy = l1 >= MIN_MATCH as u32
+                    && bits_saved(l1, d1.max(1)) > bits_saved(l0, d0.max(1)) + 8;
+                if take_lazy {
+                    toks.push(Tok::Lit(data[i]));
+                    insert(
+                        &mut head,
+                        &mut tags,
+                        &mut prev,
+                        &mut prev_tags,
+                        &mut chain,
+                        &mut scout_head,
+                        i,
+                    );
+                    i += 1;
+                    continue;
+                }
+            }
+            toks.push(Tok::Match { dist: d0, len: l0 });
+            let end = i + l0 as usize;
+            let mut p = i;
+            while p < end {
+                insert(
+                    &mut head,
+                    &mut tags,
+                    &mut prev,
+                    &mut prev_tags,
+                    &mut chain,
+                    &mut scout_head,
+                    p,
+                );
+                p += if l0 >= 64 { 4 } else { 1 };
+            }
+            i = end;
+        } else {
+            toks.push(Tok::Lit(data[i]));
+            insert(
+                &mut head,
+                &mut tags,
+                &mut prev,
+                &mut prev_tags,
+                &mut chain,
+                &mut scout_head,
+                i,
+            );
+            i += 1;
+        }
+    }
+    toks
+}
+
 
 pub fn expand(toks: &[Tok]) -> Result<Vec<u8>, &'static str> {
     let mut out = Vec::new();
@@ -910,5 +1301,45 @@ mod tests {
         let t = parse_lz4t(&s, DEFAULT_WINDOW);
         assert_eq!(expand(&t).unwrap(), s);
         assert!(t.iter().any(|x| matches!(x, Tok::Match { .. })));
+    }
+
+    #[test]
+    fn lz4t2_roundtrip_motif() {
+        let mut s = Vec::new();
+        let m = b"QWERTYUIOPASDFGH";
+        for _ in 0..200 {
+            s.extend_from_slice(m);
+            s.extend_from_slice(&[0u8; 32]);
+        }
+        let t = parse_lz4t2(&s, DEFAULT_WINDOW);
+        assert_eq!(expand(&t).unwrap(), s);
+        assert!(t.iter().any(|x| matches!(x, Tok::Match { .. })));
+    }
+
+    #[test]
+    fn lz4t_hybrid_roundtrip_motif() {
+        let mut s = Vec::new();
+        let m = b"QWERTYUIOPASDFGH";
+        for _ in 0..200 {
+            s.extend_from_slice(m);
+            s.extend_from_slice(&[0u8; 32]);
+        }
+        let t = parse_lz4t_hybrid(&s, DEFAULT_WINDOW);
+        assert_eq!(expand(&t).unwrap(), s);
+        assert!(t.iter().any(|x| matches!(x, Tok::Match { .. })));
+    }
+
+    #[test]
+    fn hybrid_find_env_selected() {
+        // Ensure helper recognizes Scout Fast F1 dial names.
+        std::env::remove_var("LBR1_HYBRID");
+        std::env::remove_var("LBR1_FIND");
+        assert!(!hybrid_find_selected());
+        std::env::set_var("LBR1_FIND", "hybrid");
+        assert!(hybrid_find_selected());
+        std::env::remove_var("LBR1_FIND");
+        std::env::set_var("LBR1_HYBRID", "1");
+        assert!(hybrid_find_selected());
+        std::env::remove_var("LBR1_HYBRID");
     }
 }
