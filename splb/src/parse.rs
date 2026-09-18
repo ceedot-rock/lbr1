@@ -263,9 +263,57 @@ fn hybrid_find_selected() -> bool {
     )
 }
 
+fn cov2_find_selected() -> bool {
+    // Scout Fast F4 Coverage-without-chain (Theory 2026-09-18). Prefer FIND over PARSE.
+    // Not Hybrid recovery knobs; not lz4t N/insert/tag retune.
+    matches!(
+        std::env::var("LBR1_FIND")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "cov2" | "f4" | "coverage" | "cov-without-chain"
+    )
+}
+
+/// Secondary-table hash (independent of primary `hash4_tag`) so collisions do not
+/// correlate — coverage shelf where the primary miss lands.
+#[inline]
+fn hash4_tag_sec(a: u8, b: u8, c: u8, d: u8) -> (usize, u16) {
+    let v = u32::from_le_bytes([a, b, c, d]);
+    // Different odd multiply + rotate so secondary buckets diverge from primary.
+    let h = v.wrapping_mul(0x85EB_CA77).rotate_left(13);
+    let idx = (h >> (32 - HASH_BITS)) as usize;
+    let tag = (h & 0xFFFF) as u16;
+    (idx, tag)
+}
+
+/// Richer accept-or-literal: match must clear a clear bit win. Marginal short+far
+/// copies inflate the tok stream vs Dial A quality — prefer literal instead.
+#[inline]
+fn cov2_accept(len: u32, dist: u32) -> bool {
+    if len < MIN_MATCH as u32 {
+        return false;
+    }
+    // Require ≥1 byte net save (bits_saved uses ~8 bits/lit).
+    if bits_saved(len, dist.max(1)) < 8 {
+        return false;
+    }
+    // Short+far often loses to literal+better later match under ml4.
+    if len < 6 && dist > 65_536 {
+        return false;
+    }
+    true
+}
+
 pub fn parse_class(data: &[u8], window: usize, class: crate::detect::Class) -> Vec<Tok> {
     let n = data.len();
     if n == 0 { return Vec::new(); }
+    // Scout Fast F4 Coverage-without-chain (measure): LBR1_FIND=cov2|f4
+    // wins over LBR1_PARSE so Dial A pack env (PARSE=hc4 PACK=ml4 …) can stay set.
+    // Limited 2-slot + secondary table + richer accept — no CHAIN, no Hybrid knobs.
+    if cov2_find_selected() {
+        return parse_cov2(data, window);
+    }
     // Scout Fast F1 Hybrid find (measure): LBR1_FIND=hybrid | LBR1_HYBRID=1
     // wins over LBR1_PARSE so Dial A pack env (PARSE=hc4 PACK=ml4 …) can stay set.
     // Fast tagged primary + selective Dial A–quality recovery on coverage holes only.
@@ -284,6 +332,7 @@ pub fn parse_class(data: &[u8], window: usize, class: crate::detect::Class) -> V
         Some("lz4t") | Some("tag1") => return parse_lz4t(data, window),
         Some("lz4t2") | Some("tag1x") => return parse_lz4t2(data, window),
         Some("lz4t-hybrid") | Some("tag1h") | Some("hybrid") => return parse_lz4t_hybrid(data, window),
+        Some("cov2") | Some("f4") | Some("coverage") => return parse_cov2(data, window),
         _ => {}
     }
     // Full DP tables are O(n) and OOM on mozilla in 2 GB. Stream instead.
@@ -1211,6 +1260,184 @@ pub fn parse_lz4t_hybrid(data: &[u8], window: usize) -> Vec<Tok> {
 }
 
 
+
+/// Scout Fast F4 **Coverage-without-chain** find (measure-only).
+///
+/// **Primary dial (Theory 2026-09-18):** `LBR1_FIND=cov2` or `LBR1_FIND=f4`
+/// (aliases `coverage` / `cov-without-chain`). Works with Dial A pack env left
+/// intact (`PARSE=hc4 PACK=ml4 WINDOW=1MiB …`) because FIND wins over PARSE.
+///
+/// Legacy: `LBR1_PARSE=cov2|f4|coverage` — compat only.
+///
+/// Shape (not Hybrid, not lz4t N-line):
+/// 1. **Primary** — tagged **2-way** set-associative head (true 2-slot; both
+///    slots live — always ≤2 primary considers). Not lz4t2 overwrite-victim
+///    gated on short tag hits; both shelves stay addressable.
+/// 2. **Secondary table** — independent hash (`hash4_tag_sec`) single-slot
+///    tagged. Probed when primary best_l < SEC_N (32) — coverage where the
+///    first miss lands, without a chain walk.
+/// 3. **Richer accept-or-literal** — `cov2_accept`: require clear bit win
+///    (`bits_saved ≥ 8`) and refuse short+far (len<6 ∧ dist>64KiB). Marginal
+///    copies become literals instead of packing noise.
+///
+/// Probe budget by construction: ≤2 primary + ≤1 secondary + ≤1 scout = ≤4
+/// (mean ≪5). **No** `LBR1_CHAIN` walk. **No** `HYBRID_RECOVERY` / probe_cap.
+/// **No** N/insert/tag retune knobs (SHORT/SEC fixed).
+///
+/// Optional (speed seat default 0):
+///   LBR1_LAZY=0|1  — greedy (default) or +1 priced lookahead
+///
+/// Pairing: measure with ship pack **ml4** only. Size/speed kill bars are
+/// Kernel clock territory — measure-only, not ship.
+pub fn parse_cov2(data: &[u8], window: usize) -> Vec<Tok> {
+    // Env (measure dial; Dial A hc4 ship path untouched when FIND unset):
+    //   LBR1_FIND=cov2|f4|coverage|cov-without-chain  — select (preferred)
+    //   LBR1_PARSE=cov2|f4|coverage                   — legacy select
+    //   LBR1_WINDOW=…                                 — Dial A bake: 1048576
+    //   LBR1_LAZY=0                                   — greedy (default)
+    // No LBR1_CHAIN / HYBRID_* — coverage is 2-slot + secondary, not recovery.
+    const SEC_N: u32 = 32; // probe secondary when primary best_l < this
+    let n = data.len();
+    let win = window.max(256).next_power_of_two();
+    let do_lazy = std::env::var("LBR1_LAZY")
+        .ok()
+        .map(|s| s != "0" && s != "false" && s != "off")
+        .unwrap_or(false);
+    // Primary 2-way tagged slots.
+    let mut head0 = vec![-1i32; HASH_SIZE];
+    let mut tags0 = vec![0u16; HASH_SIZE];
+    let mut head1 = vec![-1i32; HASH_SIZE];
+    let mut tags1 = vec![0u16; HASH_SIZE];
+    // Secondary independent table (single-slot tagged).
+    let mut sec_head = vec![-1i32; HASH_SIZE];
+    let mut sec_tags = vec![0u16; HASH_SIZE];
+    let mut scout_head = vec![-1i32; SCOUT_SIZE];
+    let use_scouts = crate::detect::scouts_wanted(data);
+    let stride = crate::detect::scout_stride(data).max(1);
+    let mut toks = Vec::new();
+    let mut i = 0usize;
+
+    let insert = |head0: &mut [i32],
+                  tags0: &mut [u16],
+                  head1: &mut [i32],
+                  tags1: &mut [u16],
+                  sec_head: &mut [i32],
+                  sec_tags: &mut [u16],
+                  scout_head: &mut [i32],
+                  pos: usize| {
+        if pos + 3 >= n {
+            return;
+        }
+        let (h, tag) = hash4_tag(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+        let old0 = head0[h];
+        // True 2-way: demote slot0 → slot1 when overwriting a different position.
+        if old0 >= 0 && (old0 as usize) != pos {
+            head1[h] = old0;
+            tags1[h] = tags0[h];
+        }
+        head0[h] = pos as i32;
+        tags0[h] = tag;
+        // Secondary shelf (independent hash).
+        let (hs, tags) = hash4_tag_sec(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+        sec_head[hs] = pos as i32;
+        sec_tags[hs] = tags;
+        if use_scouts && pos % stride == 0 && pos + 8 <= n {
+            scout_head[hash8(data, pos)] = pos as i32;
+        }
+    };
+
+    let find = |head0: &[i32],
+                tags0: &[u16],
+                head1: &[i32],
+                tags1: &[u16],
+                sec_head: &[i32],
+                sec_tags: &[u16],
+                scout_head: &[i32],
+                pos: usize|
+     -> (u32, u32) {
+        if pos + MIN_MATCH > n {
+            return (0, 0);
+        }
+        let floor = if pos > win { (pos - win) as i32 } else { -1 };
+        let mut best_l = 0u32;
+        let mut best_d = 0u32;
+        let (h, tag) = hash4_tag(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+        // Primary slot0.
+        let p0 = head0[h];
+        if p0 > floor && (p0 as usize) < pos && tags0[h] == tag {
+            consider(&mut best_l, &mut best_d, data, pos, p0 as usize);
+        }
+        // Primary slot1 (2nd shelf — always eligible, not short-hit gated).
+        let p1 = head1[h];
+        if p1 > floor && (p1 as usize) < pos && tags1[h] == tag {
+            consider(&mut best_l, &mut best_d, data, pos, p1 as usize);
+        }
+        // Secondary table when primary coverage is thin.
+        if best_l < SEC_N {
+            let (hs, tags) = hash4_tag_sec(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+            let sp = sec_head[hs];
+            if sp > floor && (sp as usize) < pos && sec_tags[hs] == tags {
+                // consider() is idempotent if sp coincides with a primary slot.
+                consider(&mut best_l, &mut best_d, data, pos, sp as usize);
+            }
+        }
+        if use_scouts && pos + 8 <= n && best_l < 32 {
+            let sp = scout_head[hash8(data, pos)];
+            if sp > floor && (sp as usize) < pos {
+                consider(&mut best_l, &mut best_d, data, pos, sp as usize);
+            }
+        }
+        // Richer accept-or-literal gate.
+        if !cov2_accept(best_l, best_d) {
+            return (0, 0);
+        }
+        (best_d, best_l)
+    };
+
+    while i < n {
+        let (d0, l0) = find(
+            &head0, &tags0, &head1, &tags1, &sec_head, &sec_tags, &scout_head, i,
+        );
+        if l0 >= MIN_MATCH as u32 {
+            if do_lazy {
+                let (d1, l1) = find(
+                    &head0, &tags0, &head1, &tags1, &sec_head, &sec_tags, &scout_head, i + 1,
+                );
+                let take_lazy = l1 >= MIN_MATCH as u32
+                    && bits_saved(l1, d1.max(1)) > bits_saved(l0, d0.max(1)) + 8;
+                if take_lazy {
+                    toks.push(Tok::Lit(data[i]));
+                    insert(
+                        &mut head0, &mut tags0, &mut head1, &mut tags1,
+                        &mut sec_head, &mut sec_tags, &mut scout_head, i,
+                    );
+                    i += 1;
+                    continue;
+                }
+            }
+            toks.push(Tok::Match { dist: d0, len: l0 });
+            let end = i + l0 as usize;
+            let mut p = i;
+            while p < end {
+                insert(
+                    &mut head0, &mut tags0, &mut head1, &mut tags1,
+                    &mut sec_head, &mut sec_tags, &mut scout_head, p,
+                );
+                p += if l0 >= 64 { 4 } else { 1 };
+            }
+            i = end;
+        } else {
+            toks.push(Tok::Lit(data[i]));
+            insert(
+                &mut head0, &mut tags0, &mut head1, &mut tags1,
+                &mut sec_head, &mut sec_tags, &mut scout_head, i,
+            );
+            i += 1;
+        }
+    }
+    toks
+}
+
 pub fn expand(toks: &[Tok]) -> Result<Vec<u8>, &'static str> {
     let mut out = Vec::new();
     for t in toks {
@@ -1341,5 +1568,31 @@ mod tests {
         std::env::set_var("LBR1_HYBRID", "1");
         assert!(hybrid_find_selected());
         std::env::remove_var("LBR1_HYBRID");
+    }
+
+    #[test]
+    fn cov2_roundtrip_motif() {
+        let mut s = Vec::new();
+        let m = b"QWERTYUIOPASDFGH";
+        for _ in 0..200 {
+            s.extend_from_slice(m);
+            s.extend_from_slice(&[0u8; 32]);
+        }
+        let t = parse_cov2(&s, DEFAULT_WINDOW);
+        assert_eq!(expand(&t).unwrap(), s);
+        assert!(t.iter().any(|x| matches!(x, Tok::Match { .. })));
+    }
+
+    #[test]
+    fn cov2_find_env_selected() {
+        std::env::remove_var("LBR1_FIND");
+        std::env::remove_var("LBR1_HYBRID");
+        assert!(!cov2_find_selected());
+        std::env::set_var("LBR1_FIND", "cov2");
+        assert!(cov2_find_selected());
+        std::env::set_var("LBR1_FIND", "f4");
+        assert!(cov2_find_selected());
+        std::env::remove_var("LBR1_FIND");
+        assert!(!cov2_find_selected());
     }
 }
