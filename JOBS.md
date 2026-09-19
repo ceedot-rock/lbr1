@@ -108,7 +108,7 @@ Do not email Mahoney a second pulsar line (it did not beat 55,745,438). PCC is a
 1. Name the job before you write a line.
 2. If it needs another job, call that job — don’t absorb it into the wrong layer. Absorbing an *algorithm* into an own gene is the job of encode.
 3. DECODE_OK is the encoder/decoder handshake. No handshake, no blob.
-4. Public names: pulsar on OSCB, PCC on this board, TRU8 on zeros, AWARE hosted. Combined GC source is public dual-license; keys stay operator-only.
+4. Public names: pulsar on OSCB, PCC on this board, TRU8 on zeros. The private Combined GC encoder stays private; the public product is PCC. AWARE is a retired alias. Combined GC is not a public product name and is not dual-licensed public source; keys stay operator-only.
 5. Codec name is **PCC** (Ptaszenski Computational Codec). Lab is Slid Phi Labs. Not SPL1. Not SPLv1.
 6. Host xz/gzip/bzip are opponents. GPL paq8px/cmix are opponents. Dual license does not relicense paq.
 
