@@ -1,6 +1,8 @@
 # Each job knows its job
 
-**PCC** — Ptaszenski Computational Codec. Slid Phi Labs. Dual AGPL-3.0-or-later OR Commercial. Public source. Signing keys stay operator-only.
+**PCC** — Ptaszenski Computational Codec. Slid Phi Labs. Dual AGPL-3.0-or-later OR Commercial. Public source for **this** tree. Signing keys stay operator-only.
+
+**Private-engine law:** Combined GC (the private encoder) is **not** dual-licensed public source, is **not** a public product name, and is **not** included in this repository’s AGPL/Commercial grant. Public product face is **PCC** (`https://www.slidphilabs.com/pcc`). AWARE is a retired alias. Do not paste Combined GC into pulsar or publish it as open.
 
 Not SPL1. Not SPLv1. Not a new platform. Not a host codec with our sticker.
 
@@ -34,7 +36,7 @@ Same seats. Occupants are lab engines.
 | **paq** | PCAQ, ZMX1, NNC1 | paq8px, cmix (GPL opponents) |
 | **mixed** | LBHM (`hybrid.rs`) | puncture 2MB meld |
 | **CDDG** | ExCalibur ELID (`arthur_gate`) MIN_RUN=1024 | 64B hole maps, Silesia GP claim |
-| **AWARE** | Combined GC own-path (Max, own skins). `gcr1` only if standard skip/fail | dump into pulsar, host xz/gzip/bzip skins |
+| **AWARE** | Private Combined GC own-path (not in this tree). `gcr1` only if standard skip/fail | dump into pulsar, host xz/gzip/bzip skins, treat as public dual-license |
 | **float_xor** | vacant | lossy quantize as lossless. STR1 xor-delta is a transform, not this seat |
 
 Router: classify → seat order → first DECODE_OK gene; then CDDG elide remainder on the **same** order; keep ELID only if `<` whole.  
@@ -66,7 +68,7 @@ DECODE_OK or the gene does not emit.
 | LBHM | `LBHM` | seamed files | split then min() |
 | PCC1 | `PCC1` | codec frame | ops ZERO MATCH BWT CMAQ LZ LZM ZMIX STR NNC STORE |
 | PCCZ | `PCCZ` | archive | `.pcc` zip. Zip-slip rejected |
-| Combined GC | own magics | ASMD **2,000,000** bytes | AWARE occupant. Host xz/gzip/bzip skins dropped |
+| Combined GC | own magics (private repo) | ASMD **2,000,000** bytes | Private AWARE occupant — not dual-licensed here. Host xz/gzip/bzip skins dropped |
 | GSS1 | `GSS1` | only if house ratio still > 0.88 | residue raffle. True random does not shrink |
 
 Hosted API: **4 MiB**, 45s, labeled `/bench`. Not official Silesia. ZMX1/NNC1 house caps mean a full 4 MiB hosted job will not sit those two mixers.
