@@ -1,22 +1,27 @@
 # OPEN_RATIO 0.31
 
-`splb::OPEN_RATIO = 0.31` is on main (`encode_best` / `lb best`).
+`pick_one` in `splb/src/pcc.rs` already uses `const OPEN: f64 = 0.31` for the
+post-MATCH/BWT mixer tail (LZ / LZM / STR / ZMIX / NNC).
 
-`lb pcc` still uses `splb/src/pcc.rs` `pick_one`:
+Scout Dial A needs a **fast** path that does not pay that tail.
 
-```rust
-    let open = best
-        .as_ref()
-        .map(|b| (b.blob.len() as f64) / (data.len() as f64) > 0.50)
-        .unwrap_or(true);
-```
-
-Replace `> 0.50` with `> crate::OPEN_RATIO` and add next to `NOMINAL_WINDOW`:
+## Env (land next to the const)
 
 ```rust
-pub const OPEN_RATIO: f64 = crate::OPEN_RATIO;
+fn open_ratio() -> f64 {
+    std::env::var("PCC_OPEN_RATIO")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|x| *x > 0.0 && *x <= 1.0)
+        .unwrap_or(0.31)
+}
 ```
 
-or just use `crate::OPEN_RATIO` in the map.
+Replace `const OPEN: f64 = 0.31` with `let open_cut = open_ratio();` and compare
+against `open_cut`.
+
+`scout-dial-a`:
+- `SCOUT_PROFILE=quality` → `PCC_OPEN_RATIO=0.31`
+- `SCOUT_PROFILE=fast` → `PCC_OPEN_RATIO=0.99`
 
 Keep tests. Do not retag Silesia. Official line remains pcc-0.12.1 = 51,498,645.
