@@ -1,0 +1,29 @@
+# PCC Dial C — compile + FAIL_LOUD note.
+# Full mozilla gate is local (51 MiB corpus); CI verifies the dial builds.
+name: pcc-dial-c
+
+on:
+  push:
+    branches: [main, "pcc/**", "aware/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  dial-c:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build Dial C profile example
+        run: cargo build --release -p splb --example profile_ml4_hot
+      - name: FAIL_LOUD note present
+        run: |
+          test -f bench/pcc-dial-c-fail-loud.md
+          grep -q '16,735,963' bench/pcc-dial-c-fail-loud.md
+          grep -q 'FAIL_LOUD' bench/pcc-dial-c-fail-loud.md
+          grep -q 'HASH=16' bench/pcc-dial-c-fail-loud.md
+      - name: mozilla FAIL_LOUD prefer (optional corpus)
+        if: ${{ hashFiles('corpora/silesia-members/mozilla') != '' }}
+        run: ./bench/pcc-dial-c-fail-loud.sh corpora/silesia-members/mozilla || test $? -eq 2

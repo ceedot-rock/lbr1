@@ -4,7 +4,7 @@
 
 Job: one PCC1 frame. Router is not a compressor. Law: [JOBS.md](JOBS.md).  
 `.pcc` is our zip (PCCZ). `lb pcc` encodes. `lb zip` / `unzip` / `ls` / `info` / `test` / `cat`.  
-Does not: dump Combined GC into this tree. Combined GC / AWARE stay in `combined-gc`. Not pulsar. Not SPH11. Not #1.
+Does not: dump the private encoder into this tree. AWARE is a retired alias for hosted PCC. Not pulsar. Not SPH11. Not #1.
 
 Tree **pcc-0.13.0** adds own genes LZM1, ZMX1, STR1, NNC1. Official Silesia numbers below are **pcc-0.12.1**.
 
@@ -18,7 +18,7 @@ Raw 211,938,580.
 | PCC | **51,498,645** | Own codec. Beats pulsar. Loses to xz-6 (~49.4M) |
 | champ mozilla lock | **14,796,694** | MATCH path, not the 12-file total |
 
-`lb champ` is the LBR1 quality path (mozilla stays MATCH). `lb stream` is TRUSTREAM (4 KiB STORE+ZERO). `lb best` is house min(). `lb aware` is house + Combined GC own-path.
+`lb champ` is the LBR1 quality path (mozilla stays MATCH). `lb stream` is TRUSTREAM (4 KiB STORE+ZERO). `lb best` is house min(). `lb aware` is a legacy seat name for house + private own-path — not a public SKU.
 
 Zeros flagship: 40,000 B → **8 B** T_ZERO DECODE_OK.
 

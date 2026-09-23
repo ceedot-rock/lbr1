@@ -374,9 +374,79 @@ fn lit_pairs(toks: &[Tok], raw: &[u8]) -> Vec<(u8, u8)> {
     pairs
 }
 
+
+/// Scout Fast F2 pack-speed dial (Theory 2026-09-18).
+/// Multi-symbol ANS scraps: rANS flags/lens/dists + best lit among o0/o1/op/(optional FastCM).
+/// Early return — no ML/RC candidate bake (that bake is the Dial A size path, not the speed path).
+/// Knobs: `LBR1_PACK=f2|msans|ans-ctrl`; optional `LBR1_F2_LIT=o0|o1|op|best` (default best);
+/// `LBR1_FASTCM=0` disables FastCM lit scrap.
+fn pack_f2_msans(toks: &[Tok], orig_len: usize, window: u32, raw: &[u8]) -> Vec<u8> {
+    let (flags, lens, dists) = split_streams(toks);
+    let pairs = lit_pairs(toks, raw);
+    let lits: Vec<u8> = pairs.iter().map(|&(_, b)| b).collect();
+    let lit_pref = std::env::var("LBR1_F2_LIT")
+        .unwrap_or_else(|_| "best".into())
+        .to_ascii_lowercase();
+    let o0 = rans::rans_encode(&lits);
+    let mut kind = 0u8;
+    let mut lit_blob = o0.clone();
+    let want_best = lit_pref == "best" || lit_pref.is_empty();
+    if lit_pref == "o0" {
+        // keep o0
+    } else if lit_pref == "o1" || want_best {
+        let o1 = rans_o1::rans_encode_o1(&pairs);
+        if o1.len() < lit_blob.len() {
+            kind = 1;
+            lit_blob = o1;
+        }
+    }
+    if lit_pref == "op" || want_best {
+        let op = crate::rans_op::rans_encode_op(&pairs);
+        if op.len() < lit_blob.len() {
+            kind = 2;
+            lit_blob = op;
+        }
+    }
+    // FastCM is opt-in for F2 (LBR1_F2_LIT=fcm|fastcm or LBR1_FASTCM=1).
+    // Default best = o0/o1/op only — FastCM lit scrap burns pack MB/s (~28 vs ~147).
+    let fastcm_force = matches!(lit_pref.as_str(), "fcm" | "fastcm")
+        || std::env::var("LBR1_FASTCM").map(|v| v == "1" || v == "true" || v == "on").unwrap_or(false);
+    if fastcm_force
+        && !crate::fastcm::should_skip(&lits)
+        && lits.len() >= 64
+    {
+        if let Some(fcm) = crate::fastcm::encode_residual(&lits) {
+            if fcm.len() < lit_blob.len() {
+                kind = crate::fastcm::LIT_KIND;
+                lit_blob = fcm;
+            }
+        }
+    }
+    // If user pinned o1 but o0 won size, still emit o1-prefer when equal? Keep smaller.
+    let _ = o0;
+    let mut out = Vec::with_capacity(13 + 16 + flags.len() / 2 + lit_blob.len());
+    out.extend_from_slice(MAGIC);
+    out.push(if kind == crate::fastcm::LIT_KIND {
+        VER_FCM
+    } else {
+        VER
+    });
+    out.extend_from_slice(&(orig_len as u32).to_le_bytes());
+    out.extend_from_slice(&window.to_le_bytes());
+    put_blob(&mut out, &rans::rans_encode(&flags));
+    out.push(kind);
+    put_blob(&mut out, &lit_blob);
+    put_blob(&mut out, &rans::rans_encode(&lens));
+    put_blob(&mut out, &rans::rans_encode(&dists));
+    out
+}
+
 pub fn pack(toks: &[Tok], orig_len: usize, window: u32, raw: &[u8]) -> Vec<u8> {
     // LBR1_PACK=ml4|ml4f: VER_ML4F (u32 RC) — ML4 models, faster wire (Kernel finder-bake).
     // LBR1_PACK=ml4exact: bit-exact VER_ML4 (u128 interval RC).
+    // LBR1_PACK=f2|msans|ans-ctrl: Scout Fast F2 multi-symbol ANS pack-speed dial
+    //   (Theory 2026-09-18). rANS control + best lit scrap; early return (no ML/RC bake).
+    //   Aimed at pack≫50 so findpack can clear 50 once a find≥50 dial exists.
     if let Some(mode) = std::env::var("LBR1_PACK").ok() {
         if mode == "ml4" || mode == "ml4f" {
             let ml4 = crate::range::encode_toks_mlit4f(toks, raw);
@@ -398,6 +468,9 @@ pub fn pack(toks: &[Tok], orig_len: usize, window: u32, raw: &[u8]) -> Vec<u8> {
             put_blob(&mut alt, &ml4);
             return alt;
         }
+        if mode == "f2" || mode == "msans" || mode == "ans-ctrl" {
+            return pack_f2_msans(toks, orig_len, window, raw);
+        }
     }
     let (flags, lens, dists) = split_streams(toks);
     let pairs = lit_pairs(toks, raw);
@@ -408,6 +481,7 @@ pub fn pack(toks: &[Tok], orig_len: usize, window: u32, raw: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&window.to_le_bytes());
     let lits: Vec<u8> = pairs.iter().map(|&(_, b)| b).collect();
     // LBR1_PACK=fast|daily → o0 only; o1 → single o1 (no FastCM/ML/RC bake).
+    // F2/msans handled above via pack_f2_msans.
     let pack_mode = std::env::var("LBR1_PACK").ok();
     let pack_fast_early = matches!(pack_mode.as_deref(), Some("fast") | Some("daily") | Some("o1"));
     let o0 = rans::rans_encode(&lits);
@@ -471,7 +545,7 @@ pub fn pack(toks: &[Tok], orig_len: usize, window: u32, raw: &[u8]) -> Vec<u8> {
     // Emit single frame; skip ML/RC candidate bake + in-pack DECODE verifies.
     let pack_fast = matches!(
         std::env::var("LBR1_PACK").ok().as_deref(),
-        Some("fast") | Some("daily") | Some("o1")
+        Some("fast") | Some("daily") | Some("o1") | Some("f2") | Some("msans") | Some("ans-ctrl")
     );
     if pack_fast {
         return out;
@@ -750,4 +824,36 @@ mod tests {
             assert_ne!(blob[4], VER_FCM, "empty residual must not seat FastCM");
         }
     }
+    #[test]
+    fn f2_msans_roundtrip_motif() {
+        let s = b"ABCDxxxxABCDyyyyABCD".repeat(80);
+        let toks = parse::parse(&s, parse::DEFAULT_WINDOW);
+        std::env::set_var("LBR1_PACK", "f2");
+        let blob = pack(&toks, s.len(), parse::DEFAULT_WINDOW as u32, &s);
+        std::env::remove_var("LBR1_PACK");
+        assert!(blob.len() >= 13, "frame too short");
+        let (back, _) = unpack_bytes(&blob).expect("unpack f2");
+        assert_eq!(back, s.as_slice());
+        // Must be multi-symbol ANS path (VER or VER_FCM), not ML4F.
+        assert!(
+            blob[4] == VER || blob[4] == VER_FCM,
+            "f2 must emit VER/VER_FCM, got {}",
+            blob[4]
+        );
+    }
+
+    #[test]
+    fn f2_env_aliases_select_msans() {
+        let s = b"0123456789abcdef".repeat(200);
+        let toks = parse::parse(&s, parse::DEFAULT_WINDOW);
+        for mode in ["f2", "msans", "ans-ctrl"] {
+            std::env::set_var("LBR1_PACK", mode);
+            let blob = pack(&toks, s.len(), parse::DEFAULT_WINDOW as u32, &s);
+            let (back, _) = unpack_bytes(&blob).expect("unpack");
+            assert_eq!(back, s.as_slice(), "mode {mode}");
+            assert!(blob[4] == VER || blob[4] == VER_FCM, "mode {mode} ver {}", blob[4]);
+        }
+        std::env::remove_var("LBR1_PACK");
+    }
+
 }

@@ -1,4 +1,5 @@
-//! PCC Dial A profile — hc4 W=1MiB CHAIN=4 LAZY=0 PACK=ml4
+//! PCC Dial C / Dial A profile — hc4 W=1MiB CHAIN=8 LAZY=0 PACK=ml4
+//! Dial C prefer (HASH=16 INSERT=ends) is FAIL_LOUD; defaults stay Dial A (HASH=17 INSERT=dense).
 //! FAIL_LOUD if packed >= zstd-9 (16_735_963) or DECODE_OK false.
 fn main() {
     let path = std::env::args()
@@ -9,12 +10,21 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1 << 20);
-    // Dial A defaults (shallower parse). CHAIN=8 ships (CHAIN=4 FAIL_LOUD on mozilla size).
+    // Dial A ship defaults. Dial C prefer overrides via env (see bench/pcc-dial-c-fail-loud.md).
     if std::env::var("LBR1_PARSE").is_err() {
         std::env::set_var("LBR1_PARSE", "hc4");
     }
     if std::env::var("LBR1_CHAIN").is_err() {
         std::env::set_var("LBR1_CHAIN", "8");
+    }
+    if std::env::var("LBR1_HASH").is_err() {
+        std::env::set_var("LBR1_HASH", "17");
+    }
+    if std::env::var("LBR1_INSERT").is_err() {
+        std::env::set_var("LBR1_INSERT", "dense");
+    }
+    if std::env::var("LBR1_FIND").is_err() {
+        std::env::set_var("LBR1_FIND", "price");
     }
     if std::env::var("LBR1_LAZY").is_err() {
         std::env::set_var("LBR1_LAZY", "0");
@@ -40,12 +50,15 @@ fn main() {
     let zstd9 = 16_735_963usize;
     let fail_loud = blob.len() >= zstd9 || !dok;
     println!(
-        "raw={} toks={} pack_bytes={} ver={} pack_mode={:?} parse_ms={:.1} pack_ms={:.1} decode_ms={:.1} DECODE_OK={} parse_MBps={:.2} pack_MBps={:.2} findpack_MBps={:.2} vs_zstd9={} FAIL_LOUD={}",
+        "raw={} toks={} pack_bytes={} ver={} pack_mode={:?} hash={} insert={:?} find={:?} parse_ms={:.1} pack_ms={:.1} decode_ms={:.1} DECODE_OK={} parse_MBps={:.2} pack_MBps={:.2} findpack_MBps={:.2} vs_zstd9={} FAIL_LOUD={}",
         data.len(),
         toks.len(),
         blob.len(),
         blob.get(4).copied().unwrap_or(0),
         std::env::var("LBR1_PACK").ok(),
+        std::env::var("LBR1_HASH").unwrap_or_else(|_| "?".into()),
+        std::env::var("LBR1_INSERT").ok(),
+        std::env::var("LBR1_FIND").ok(),
         parse_ms,
         pack_ms,
         dec_ms,

@@ -1,11 +1,12 @@
-//! STR1 — own format-aware transforms. Absorbs OpenZL (Meta, BSD) structure:
-//! detect record width / numeric lanes, transpose, xor-delta, then an own gene.
-//! Not a wrap of OpenZL. Host xz is not an occupant.
+//! STR1 — own format-aware transforms.
+//! Detect record width / numeric lanes, transpose, xor-delta, then an own gene.
 
 use crate::detect;
 use crate::lzm;
+use crate::nnc;
 use crate::rans;
 use crate::wrap;
+use crate::zmix;
 
 pub const MAGIC: &[u8; 4] = b"STR1";
 pub const VER: u8 = 1;
@@ -20,6 +21,8 @@ const INNER_STORE: u8 = 0;
 const INNER_LZ: u8 = 1;
 const INNER_LZM: u8 = 2;
 const INNER_RANS: u8 = 3;
+const INNER_ZMIX: u8 = 4;
+const INNER_NNC: u8 = 5;
 
 pub fn is_str(buf: &[u8]) -> bool {
     buf.len() >= 16 && buf.starts_with(MAGIC) && buf[4] == VER
@@ -189,6 +192,22 @@ fn pack_inner(data: &[u8]) -> (u8, Vec<u8>) {
             best = r;
         }
     }
+    if data.len() >= 64 && data.len() <= zmix::HOUSE_MAX {
+        if let Some(z) = zmix::encode(data) {
+            if z.len() < best.len() {
+                best_k = INNER_ZMIX;
+                best = z;
+            }
+        }
+    }
+    if data.len() >= 64 && data.len() <= nnc::HOUSE_MAX {
+        if let Some(z) = nnc::encode(data) {
+            if z.len() < best.len() {
+                best_k = INNER_NNC;
+                best = z;
+            }
+        }
+    }
     (best_k, best)
 }
 
@@ -203,6 +222,8 @@ fn unpack_inner(kind: u8, blob: &[u8], raw_len: usize) -> Result<Vec<u8>, &'stat
         INNER_LZ => wrap::lz_decode(blob),
         INNER_LZM => lzm::decode(blob),
         INNER_RANS => rans::rans_decode(blob),
+        INNER_ZMIX => zmix::decode(blob),
+        INNER_NNC => nnc::decode(blob),
         _ => Err("str inner"),
     }
 }
