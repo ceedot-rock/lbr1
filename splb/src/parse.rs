@@ -324,6 +324,7 @@ pub fn parse_class(data: &[u8], window: usize, class: crate::detect::Class) -> V
     // Daily dial: LBR1_PARSE=lazy|hc4 forces hash-chain lazy finder even on large files.
     // Measure dial: LBR1_PARSE=lz4t|tag1 selects LZ4-class tagged/single-slot find
     // (no chain table). LBR1_PARSE=lz4t2|tag1x = lz4t + ≤1 alternate on short tag hits.
+
     // LBR1_PARSE=lz4t-hybrid|tag1h = legacy alias for Hybrid find (prefer FIND=hybrid).
     // Default unset keeps max/PCC BT4 path. Does not change bitstream.
     // Dial A ship defaults (hc4 / W=1MiB / CHAIN=8 / HASH=17) stay unchanged.
@@ -331,6 +332,7 @@ pub fn parse_class(data: &[u8], window: usize, class: crate::detect::Class) -> V
         Some("lazy") | Some("hc4") => return parse_lazy(data, window),
         Some("lz4t") | Some("tag1") => return parse_lz4t(data, window),
         Some("lz4t2") | Some("tag1x") => return parse_lz4t2(data, window),
+
         Some("lz4t-hybrid") | Some("tag1h") | Some("hybrid") => return parse_lz4t_hybrid(data, window),
         Some("cov2") | Some("f4") | Some("coverage") => return parse_cov2(data, window),
         _ => {}
@@ -1050,6 +1052,7 @@ pub fn parse_lz4t2(data: &[u8], window: usize) -> Vec<Tok> {
 }
 
 
+
 /// Scout Fast F1 **Hybrid find** (measure-only): fast tagged primary + selective
 /// Dial A–quality recovery on coverage holes. Not a full hc4/CHAIN=8 find wall.
 ///
@@ -1542,6 +1545,7 @@ mod tests {
         assert_eq!(expand(&t).unwrap(), s);
         assert!(t.iter().any(|x| matches!(x, Tok::Match { .. })));
     }
+
 
     #[test]
     fn lz4t_hybrid_roundtrip_motif() {
