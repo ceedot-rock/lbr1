@@ -146,13 +146,13 @@ pub fn encode_window(data: &[u8], window: u32) -> Option<Vec<u8>> {
         Some("fast") | Some("daily") | Some("o1") | Some("f2") | Some("msans") | Some("ans-ctrl") | Some("ml4") | Some("ml4f") | Some("ml4exact")
     ) || matches!(
         std::env::var("LBR1_PARSE").ok().as_deref(),
-        Some("lazy") | Some("hc4") | Some("lz4t") | Some("tag1") | Some("lz4t2") | Some("tag1x") | Some("lz4t-hybrid") | Some("tag1h") | Some("hybrid")
+        Some("lazy") | Some("hc4") | Some("lz4t") | Some("tag1") | Some("lz4t2") | Some("tag1x") | Some("lz4t-hybrid") | Some("tag1h") | Some("hybrid") | Some("cov2") | Some("f4") | Some("coverage")
     ) || matches!(
         std::env::var("LBR1_FIND")
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str(),
-        "hybrid" | "f1" | "fast-hybrid"
+        "hybrid" | "f1" | "fast-hybrid" | "cov2" | "f4" | "coverage" | "cov-without-chain"
     ) || matches!(
         std::env::var("LBR1_HYBRID").ok().as_deref(),
         Some("1") | Some("true") | Some("on") | Some("yes")
