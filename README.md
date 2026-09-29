@@ -23,6 +23,8 @@ Raw 211,938,580.
 Zeros flagship: 40,000 B → **8 B** T_ZERO DECODE_OK.
 
 ```
+git clone --recurse-submodules https://github.com/ceedot-rock/lbr1.git
+cd lbr1
 cargo build --release -p splb --bin lb
 ./target/release/lb pcc FILE [OUT]
 ./target/release/lb zip OUT.pcc DIR

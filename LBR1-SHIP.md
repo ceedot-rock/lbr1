@@ -1,8 +1,8 @@
-# PCC — Slid Phi Labs (PRIVATE)
+# PCC — Slid Phi Labs
 
 **PCC** — Ptaszenski Computational Codec.
 Engines: LBR1 / LBHM / TRU8 / TR8X / BW22.
-All rights reserved. Not public. Not a wrap. Combined GC is not in this tree.
+All rights reserved. Not a wrap. Combined GC is not in this tree.
 
 ## Champ (DECODE_OK)
 

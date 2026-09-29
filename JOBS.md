@@ -80,7 +80,7 @@ Raw **211,938,580**. gzip/bzip2/xz are opponents. Not a #1 claim. Matrix `pcc-0.
 | Pathway | Packed | DECODE_OK | Spec |
 |---|---:|---:|---|
 | **pulsar 2.5.0** | **55,745,438** | 12/12 | Matches published OSCB. Beats gzip-9 (~67.6M). Loses to xz-6 (~49.4M) and zpaq-class |
-| **PCC** | **51,498,645** | 12/12 | Own codec. 4,246,793 inside pulsar. Still loses to xz-6 (~49.4M). Not a Mahoney line until we send one |
+| **PCC** | **51,498,645** | 12/12 | Own codec. 4,246,793 inside pulsar. Still loses to xz-6 (~49.4M). Mahoney letter SENT 2026-09-09 — not yet listed on his board |
 | champ | running | — | LBR1 quality. mozilla lock 14,796,694 is the MATCH spec, not this matrix yet |
 | best / aware | not started | — | Do not write a total until 12/12 |
 | AWARE+XZ1 **47,752,368** | retired | — | Host xz occupant. Off the scoreboard. Not the product spec |

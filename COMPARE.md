@@ -1,6 +1,6 @@
 # PCC vs pulsar — private note 2026-09-03
 
-Not public. Not Combined GC. Not a rank claim vs paq8px / cmix / zpaq.
+Not Combined GC. Not a rank claim vs paq8px / cmix / zpaq.
 
 ## Wrap our own methods (the DNA question)
 
