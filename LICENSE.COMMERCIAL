@@ -1,15 +1,26 @@
 Slid Phi Labs Commercial License
 Copyright (c) 2026 Slid Phi Labs / Corey Tasz.
 
+Scope
+- This commercial grant covers **LBR1 / PCC / splb** as published in this
+  public tree (dual AGPL-3.0-or-later OR Commercial).
+- It does **not** include Combined GC, the private encoder, or any
+  vendor/combined-gc sources. Those stay private-engine and are licensed
+  separately (if at all). Do not treat a seat here as Combined GC source.
+
 If you have a valid paid grant for LBR1 / PCC / splb,
 you may use, modify, and deploy LBR1 / PCC / splb in a product
 without AGPL source-offer obligations.
 
-An AWARE year seat ($490, SKU gc-year) is the commercial grant for this tree. Hosted compression already runs it.
+A PCC year seat ($490, SKU gc-year — checkout id only; public name is PCC)
+is the commercial grant for **this** tree. Hosted compression already runs
+the public pathways. Combined GC is not dual-licensed public source and is
+not shipped in this repository.
 
 SKU gc-year $490 · https://www.slidphilabs.com/pay?sku=gc-year
+Product face: https://www.slidphilabs.com/pcc
 
-No trademark license for LBR1, PCC, splb, or Slid Phi Labs.
+No trademark license for LBR1, PCC, splb, Combined GC, or Slid Phi Labs.
 
 Host xz/gzip/bzip2 skins stay retired. Signing keys and production
 AUTH_DIR data stay operator-only.

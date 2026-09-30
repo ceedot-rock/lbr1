@@ -6,7 +6,8 @@
 //!
 //! Public extension is `.pcc`. Magics stay in this crate.
 
-use crate::{blob_kind, decode, encode_best};
+use crate::crc::crc32;
+use crate::{blob_kind, compress_member, decode};
 
 pub const MAGIC: &[u8; 4] = b"PCCZ";
 pub const VER: u8 = 1;
@@ -41,21 +42,6 @@ pub struct ListEntry {
 
 pub fn is_pccz(buf: &[u8]) -> bool {
     buf.len() >= 8 && buf.starts_with(MAGIC) && buf[4] == VER
-}
-
-pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xEDB8_8320
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
 }
 
 pub fn clean_name(name: &str) -> Result<String, &'static str> {
@@ -148,14 +134,8 @@ pub fn zip_bytes(members: &[Member]) -> Result<Vec<u8>, &'static str> {
         let crc = crc32(raw);
         let (packed, stored) = if m.dir || raw.is_empty() {
             (Vec::new(), true)
-        } else if let Some((b, _)) = encode_best(raw) {
-            if b.len() < raw.len() && decode(&b).ok().as_deref() == Some(raw) {
-                (b, false)
-            } else {
-                (raw.to_vec(), true)
-            }
         } else {
-            (raw.to_vec(), true)
+            compress_member(raw)
         };
         if stored {
             flags |= FLAG_STORED;

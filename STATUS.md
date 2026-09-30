@@ -2,9 +2,10 @@
 
 **PCC** — Ptaszenski Computational Codec. Slid Phi Labs. Proprietary. Do not make this repository public.
 
-Codec: **PCC**. Crate: `splb`. CLI: `lb`. Version: **pcc-0.10.0**.
+Codec: **PCC**. Crate: `splb`. CLI: `lb`. Version: **pcc-0.13.0**. Official Silesia line remains **pcc-0.12.1**.
 Frame is law. Autonoma (Sentinel NCA + scout swarm + inhibitor) pick specialists. Not genes.
-Ops: ZERO / MATCH / BWT / CMAQ / STORE. Crush-early: if a specialist already won, skip the rest.
+Ops: ZERO / MATCH / BWT / CMAQ / LZ / STORE. PCC1 v2 carries CRC-32 of the raw. `.pcc` is the zip (PCCZ).
+Crush-early: if a specialist already won, skip the rest.
 PCCaq = own mixer. Not paq8px. Not host xz. Combined GC is not an op.
 TRUSTREAM: `lb stream` — STORE+ZERO on 4 KiB tiles. Not a Silesia contestant.
 `lb champ` is the LBR1 quality path. Combined GC is not an op.
