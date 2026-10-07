@@ -1,0 +1,31 @@
+# Audited checks
+#
+# Adapted from the ExactOdds template to this repo's own build: compile the
+# workspace, run the Rust test suite, and smoke the `lb` codec end to end.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-smoke:
+    name: Build + test + codec smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build workspace (release)
+        run: cargo build --release --workspace
+      - name: Run tests
+        run: cargo test --workspace --release
+      - name: Codec roundtrip smoke
+        run: |
+          ./target/release/lb pcc README.md /tmp/smoke.pcc
+          ./target/release/lb test /tmp/smoke.pcc | grep -q DECODE_OK
