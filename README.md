@@ -1,5 +1,7 @@
 # PCC
 
+[![Audited checks](https://github.com/ceedot-rock/lbr1/actions/workflows/audited-checks.yml/badge.svg)](https://github.com/ceedot-rock/lbr1/actions/workflows/audited-checks.yml) [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
 **PCC** — Ptaszenski Computational Codec. Slid Phi Labs. Dual-licensed AGPL-3.0-or-later OR Commercial. Public source. Signing keys stay operator-only.
 
 Job: one PCC1 frame. Router is not a compressor. Law: [JOBS.md](JOBS.md).  
