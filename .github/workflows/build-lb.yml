@@ -1,0 +1,33 @@
+# Build the `lb` Linux binary for the hosted engine (PULSAR_BIN/LB_BIN).
+# Uploads `lb-x86_64-linux` as a run artifact; download it and ship to /app/bin/lb.
+name: build-lb
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "splb/**"
+      - "lbr1_price/**"
+      - "speed-cmp/**"
+      - ".github/workflows/build-lb.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build lb (release)
+        run: cargo build --release -p splb --bin lb
+      - name: smoke test
+        run: |
+          head -c 100000 /dev/urandom > /tmp/rnd.bin || true
+          ./target/release/lb --help || ./target/release/lb help || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lb-x86_64-linux
+          path: target/release/lb
+          if-no-files-found: error
