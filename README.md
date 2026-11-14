@@ -1,31 +1,31 @@
 # PCC
 
-[![Audited checks](https://github.com/ceedot-rock/lbr1/actions/workflows/audited-checks.yml/badge.svg)](https://github.com/ceedot-rock/lbr1/actions/workflows/audited-checks.yml) [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![Audited checks](https://github.com/Slid-Phi-Labs/lbr1/actions/workflows/audited-checks.yml/badge.svg)](https://github.com/Slid-Phi-Labs/lbr1/actions/workflows/audited-checks.yml) [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-**PCC** — Ptaszenski Computational Codec. Slid Phi Labs. Dual-licensed AGPL-3.0-or-later OR Commercial. Public source. Signing keys stay operator-only.
+**PCC** is Slid Phi Labs' lossless compressor. This repo is the public measuring path: the command-line tool we use to pack files and check that every byte comes back. It is dual-licensed (AGPL-3.0-or-later or a commercial grant). The hosted service is at https://www.slidphilabs.com/pcc. Signing keys stay with the operator, and our private encoder is not in this tree.
 
-Job: one PCC1 frame. Router is not a compressor. Law: [JOBS.md](JOBS.md).  
-`.pcc` is our zip (PCCZ). `lb pcc` encodes. `lb zip` / `unzip` / `ls` / `info` / `test` / `cat`.  
-Does not: dump the private encoder into this tree. AWARE is a retired alias for hosted PCC. Not pulsar. Not SPH11. Not #1.
+`.pcc` is our zip format. `lb pcc` packs a file. `lb zip` / `unzip` / `ls` / `info` / `test` / `cat` work on archives. See [JOBS.md](JOBS.md) for what each command is responsible for.
 
-Tree **pcc-0.13.0** adds own genes LZM1, ZMX1, STR1, NNC1. Official Silesia numbers below are **pcc-0.12.1**.
+This tree is **pcc-0.13.0**. The official Silesia numbers below were measured with **pcc-0.12.1**.
 
-## Official Silesia (12 whole files, DECODE_OK)
+## Official Silesia (12 whole files, every byte restored)
 
-Raw 211,938,580.
+Raw 211,938,580 bytes.
 
-| Pathway | Packed | Notes |
+| Compressor | Packed | Notes |
 |---|---:|---|
-| pulsar 2.5.0 | **55,745,438** | Matches OSCB |
-| PCC | **51,498,645** | Own codec. Beats pulsar. Loses to xz-6 (~49.4M) |
-| champ mozilla lock | **14,796,694** | MATCH path, not the 12-file total |
+| TNSSRC 0.1.0 | **43,724,575** | Our compressor that runs on your own machine (about 43.72M). Beats xz-9. Not a #1 claim. |
+| PCC | **51,498,645** | Hosted. Beats pulsar. Loses to xz-6 (about 49.4M). |
+| pulsar 2.5.0 | **55,745,438** | Free demo. Matches the OSCB figure. |
 
-`lb champ` is the LBR1 quality path (mozilla stays MATCH). `lb stream` is TRUSTREAM (4 KiB STORE+ZERO). `lb best` is house min(). `lb aware` is a legacy seat name for house + private own-path — not a public SKU.
+Full board: https://www.slidphilabs.com/silesia
 
-Zeros flagship: 40,000 B → **8 B** T_ZERO DECODE_OK.
+`lb champ` is the quality path. `lb stream` is TRUSTREAM, for live data in 4 KiB tiles. `lb best` keeps whichever of our methods packs smallest.
+
+Zeros: 40,000 bytes of zeros pack to **8 bytes** and restore exactly.
 
 ```
-git clone --recurse-submodules https://github.com/ceedot-rock/lbr1.git
+git clone --recurse-submodules https://github.com/Slid-Phi-Labs/lbr1.git
 cd lbr1
 cargo build --release -p splb --bin lb
 ./target/release/lb pcc FILE [OUT]
